@@ -4,8 +4,11 @@
   The goal of this project is to reduce the overhead of mutex lock in Go by replacing it with Hardware Transactional Memory (HTM).
   It will generate a patch for the given source code with HTM replacement after static analysis on the call graph.
 
+## How to get it
+`go get -u github.com/uber-research/GOCC/...`
+
 ## How to run
-`cd GOCC/tools/gocc`.
+`cd $GOPATH/GOCC/tools/gocc`.
 
 `go run main.go -input <go package>` then the source code will be rewritten.
   optional command line flags:
