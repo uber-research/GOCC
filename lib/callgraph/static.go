@@ -38,7 +38,14 @@ func BuildRtaCG(prog *ssa.Program, useAllRoots bool) *callgraph.Graph {
 			cgroots = append(cgroots, f)
 		}
 	} else {
-		mainPkgs := ssautil.MainPackages(prog.AllPackages())
+		// mainPkgs := ssautil.MainPackages(prog.AllPackages())
+		mainPkgs := make([]*ssa.Package, 1)
+		for _, pkg := range prog.AllPackages() {
+			if pkg != nil && pkg.Pkg.Name() == "main" {
+				mainPkgs[0] = pkg
+				break
+			}
+		}
 		if len(mainPkgs) == 0 {
 			panic("No main packages found.")
 		}

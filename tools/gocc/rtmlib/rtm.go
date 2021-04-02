@@ -9,12 +9,12 @@
 package rtmlib
 
 import (
+	"runtime"
 	"sync"
-	"sync/atomic"
 	"unsafe"
 
-	rdtsc "github.com/uber-research/GOCC/tools/gocc/gordtsc"
 	"github.com/intel-go/cpuid"
+	rdtsc "github.com/uber-research/GOCC/tools/gocc/gordtsc"
 )
 
 // indicate the CPU support RTM or not
@@ -30,8 +30,9 @@ var confidenceThreshold int32 = 1
 
 const perceptronEntry = (1 << 12) // Must be a power of 2
 const perceptronEntryMask = (perceptronEntry - 1)
-const weightThreshold = 2
-const slowpathRepeatThreshold = 20 // if we are using the slow path for a long time, retry HTM
+const weightThreshold = 3
+const trialNumber = 5
+const slowpathRepeatThreshold = 50000 // if we are using the slow path for a long time, retry HTM
 
 const cacheLinePadSize = 128
 
@@ -41,11 +42,6 @@ const notSameLockError = 0x10
 // TODO: change OptiLock into interface so that stats counter is optional
 type OptiLock struct {
 	isSlowPath        bool
-	Commit            int
-	HTMtake           int
-	Abort             int
-	SlowLock          int
-	SlowUnlock        int
 	tsc               uint64
 	rtmFails          bool
 	underlyingMutex   *sync.Mutex
@@ -74,17 +70,22 @@ const (
 
 var weight [_MAX_WEIGHTS][perceptronEntry]cell
 
-var trailNum = []uint8{5, 10, 1}
+var trailNum = []uint8{trialNumber, trialNumber, trialNumber}
 
 func init() {
 	hasRTM = cpuid.HasExtendedFeature(cpuid.RTM)
+	// if we know the program is executed in single thread, then don't use HTM at all
+	procsNum := runtime.GOMAXPROCS(0)
+	if procsNum == 1 {
+		hasRTM = false
+	}
 	for j := 0; j < _MAX_WEIGHTS; j++ {
 		for i := 0; i < perceptronEntry; i++ {
 			weight[j][i].weightIP = 3
 			weight[j][i].weightLock = 3
 			weight[j][i].trial = trailNum[j]
 			weight[j][i].remainingTrial = trailNum[j]
-			weight[j][i].duration = 10000
+			weight[j][i].duration = 100
 			weight[j][i].success = 0
 			weight[j][i].failure = 0
 			weight[j][i].sleep = 0
@@ -96,9 +97,8 @@ func init() {
 func reInit(c *cell) {
 	c.weightIP = 2
 	c.weightLock = 2
-	c.trial = 3
-	c.remainingTrial = 3
-	c.duration = 5000
+	c.duration = 50
+	c.trial = trialNumber
 	c.success = 0
 	c.failure = 0
 	c.sleep = 0
@@ -136,7 +136,11 @@ func getRWMutexInfo(lock *sync.RWMutex) (uint32, uint32) {
 	return *(*uint32)(unsafe.Pointer(lock)), *(*uint32)(unsafe.Pointer(uintptr(unsafe.Pointer(lock)) + unsafe.Sizeof(int32(0))))
 }
 
-func getPerceptronIndex(funcAddr, lockAddr uintptr) uint64 {
+func getPerceptronIndex(funcAddr uintptr) uint64 {
+	return ((uint64)((funcAddr)>>3) & (perceptronEntryMask))
+}
+
+func getComposedIndex(funcAddr, lockAddr uintptr) uint64 {
 	return ((uint64)((funcAddr^lockAddr)>>3) & (perceptronEntryMask))
 }
 
@@ -157,8 +161,8 @@ func checkConfidence(success, failure int32) bool {
 	return success*confidenceThreshold > failure
 }
 
-func goOnSlowPath(c *cell) bool {
-	return c.weightIP+c.weightLock < weightThreshold
+func goOnSlowPath(c1, c2 *cell) bool {
+	return c1.weightIP+c2.weightLock < weightThreshold
 }
 
 func isUnpairedUnlock(status uint32) bool {
@@ -180,9 +184,13 @@ func (ml *OptiLock) Lock(lock *sync.Mutex) {
 	ml.underlyingMutex = lock
 	funcAddr := (uintptr)(unsafe.Pointer(ml))
 	lockAddr := (uintptr)(unsafe.Pointer(lock))
-	idx := getPerceptronIndex(funcAddr, lockAddr)
+	idx := getPerceptronIndex(funcAddr)
+	id2 := getComposedIndex(funcAddr, lockAddr)
 	entry := &weight[_MUTEXT_WEIGHT][idx]
+	entry2 := &weight[_MUTEXT_WEIGHT][id2]
 	entry.remainingTrial = entry.trial
+	noRetry := false
+	spinTime := spinLimit
 	// fast path
 
 	// there are two ways to control the decay, one is giving a large value and decrement by a little bit
@@ -191,10 +199,11 @@ func (ml *OptiLock) Lock(lock *sync.Mutex) {
 	if entry.sleep > slowpathRepeatThreshold {
 		reInit(entry)
 	}
-	ml.tsc = rdtsc.Counter()
+	// ml.tsc = rdtsc.Counter()
 	// perceptron says to use HTM
-	if goOnSlowPath(entry) {
+	if goOnSlowPath(entry, entry2) {
 		// perceptron says not to use HTM
+		noRetry = true
 		goto _SLOWPATH
 	}
 
@@ -214,31 +223,35 @@ func (ml *OptiLock) Lock(lock *sync.Mutex) {
 		// abort because lock and unlock do not pair
 		if isUnpairedUnlock(status) || entry.remainingTrial == 0 {
 			ml.rtmFails = true
+			noRetry = true
 			goto _SLOWPATH
 		}
-
-		// Decrement number of trials
 		entry.remainingTrial--
-		if status&(TxAbortRetry|TxAbortConflict|TxAbortExplicit) != 0 {
-
+		// Decrement number of trials
+		if (status & (TxAbortExplicit | TxAbortRetry | TxAbortConflict)) != 0 {
 			// Spin a bit and then retry
-			loopCnt := int(entry.duration)
-			for i := 0; i < loopCnt; i++ {
-				atomic.LoadInt32(&dummySpinLoad[32])
+			for i := 0; i < spinTime; i++ {
+				// atomic.LoadInt32(&dummySpinLoad[32])
 			}
+			// spinTime <<= 1
+		} else {
+			noRetry = true
+			ml.rtmFails = true
+			goto _SLOWPATH
 		}
 	}
 
 _SLOWPATH:
 	entry.sleep++ // Racey update is OK.
 	ml.isSlowPath = true
-	ml.SlowLock++ // TODO: remove?
 
-	loopCnt := int(entry.duration)
-	for i := 0; i < loopCnt; i++ {
-		atomic.LoadInt32(&dummySpinLoad[32])
+	if noRetry == false {
+		for i := 0; i < spinTime; i++ {
+			// atomic.LoadInt32(&dummySpinLoad[32])
+		}
 	}
-
+	// TODO: set this direct jump
+	// _SLOWPATH_NOWAIT:
 	lock.Lock()
 	return
 }
@@ -258,50 +271,31 @@ func (ml *OptiLock) Unlock(lock *sync.Mutex) {
 	}
 	funcAddr := (uintptr)(unsafe.Pointer(ml))
 	lockAddr := (uintptr)(unsafe.Pointer(lock))
-	idx := getPerceptronIndex(funcAddr, lockAddr)
+	idx := getPerceptronIndex(funcAddr)
+	id2 := getComposedIndex(funcAddr, lockAddr)
 	entry := &weight[_MUTEXT_WEIGHT][idx]
+	entry2 := &weight[_MUTEXT_WEIGHT][id2]
 
 	if ml.isSlowPath == true {
 		// it is a mutex
 		lock.Unlock()
-		ml.SlowUnlock++ // TODO: remove later
-
-		timeElapse := rdtsc.Counter() - ml.tsc
 		// update the weight since they are not working
 
 		// we enter here since we used up all the trials
 		if ml.rtmFails == true {
-			entry.weightIP = bounded(entry.weightIP, -1)
-			entry.weightLock = bounded(entry.weightLock, -1)
-			entry.failure++
+			entry.weightIP = bounded(entry.weightIP, -2)
+			entry2.weightLock = bounded(entry2.weightLock, -2)
 			if entry.trial > 0 {
-				// allows more trial only if the spin time is much shorter than time elapsed.
-				if timeElapse > uint64(entry.duration*uint32(entry.trial)*2) {
-					entry.duration = uint32(timeElapse)
-				} else {
-					entry.trial--
-				}
+				// entry.trial--
 			}
 		}
 
 	} else {
 		// it is a rtm
 		TxEnd()
-
-		timeElapse := rdtsc.Counter() - ml.tsc
-
 		// HTM works, update the weight
-		entry.weightIP = bounded(entry.weightIP, int8(entry.trial))
-		entry.weightLock = bounded(entry.weightLock, int8(entry.trial))
-
-		if entry.remainingTrial <= 1 {
-			entry.duration = uint32(timeElapse)
-			entry.trial--
-		} else if entry.trial-entry.remainingTrial <= 1 && entry.duration > 2*uint32(timeElapse) {
-			entry.duration = uint32(timeElapse)
-		}
-
-		entry.success++
+		entry.weightIP = bounded(entry.weightIP, 1)
+		entry2.weightLock = bounded(entry2.weightLock, 1)
 	}
 }
 
@@ -319,22 +313,24 @@ func (ml *OptiLock) RLock(lock *sync.RWMutex) {
 	ml.underlyingRWMutex = lock
 	funcAddr := (uintptr)(unsafe.Pointer(ml))
 	lockAddr := (uintptr)(unsafe.Pointer(lock))
-	idx := getPerceptronIndex(funcAddr, lockAddr)
+	idx := getPerceptronIndex(funcAddr)
+	id2 := getComposedIndex(funcAddr, lockAddr)
 	entry := &weight[_RLOCK_WEIGHT][idx]
+	entry2 := &weight[_RLOCK_WEIGHT][id2]
 	entry.remainingTrial = entry.trial
+	noRetry := false
+	spinTime := spinLimit
 	// fast path
 	// localTrial := 1 + entry.trial // 1+ to make sure we are never zero
 
 	if entry.sleep > slowpathRepeatThreshold {
 		reInit(entry)
-		// TODO: give more trial to reader lock only
-		entry.trial = 5
-		entry.remainingTrial = 5
 	}
 
 	// perceptron says to use HTM
-	if goOnSlowPath(entry) {
+	if goOnSlowPath(entry, entry2) {
 		// perceptron says not to use HTM
+		noRetry = true
 		goto _SLOWPATH
 	}
 
@@ -356,28 +352,33 @@ func (ml *OptiLock) RLock(lock *sync.RWMutex) {
 		// abort because lock and unlock do not pair
 		if isUnpairedUnlock(status) || entry.remainingTrial == 0 {
 			ml.rtmFails = true
+			noRetry = true
 			goto _SLOWPATH
 		}
-
 		entry.remainingTrial--
-		if status&(TxAbortRetry|TxAbortConflict|TxAbortExplicit) != 0 {
+		if (status & (TxAbortExplicit | TxAbortRetry | TxAbortConflict)) != 0 {
 			// We'll retry
 			// try a little bit more if confidence score is high
 			// Spin a bit and then retry
-			loopCnt := int(entry.duration)
-			for i := 0; i < loopCnt; i++ {
-				atomic.LoadInt32(&dummySpinLoad[32])
+			for i := 0; i < spinTime; i++ {
+				// atomic.LoadInt32(&dummySpinLoad[32])
 			}
+			// spinTime <<= 1
+		} else {
+			noRetry = true
+			ml.rtmFails = true
+			goto _SLOWPATH
 		}
 	}
 
 _SLOWPATH:
 	entry.sleep++ // Racey update is OK.
 	ml.isSlowPath = true
-	ml.SlowLock++ // TODO: remove?
-	loopCnt := int(entry.duration)
-	for i := 0; i < loopCnt; i++ {
-		atomic.LoadInt32(&dummySpinLoad[32])
+
+	if noRetry == false {
+		for i := 0; i < spinTime; i++ {
+			// atomic.LoadInt32(&dummySpinLoad[32])
+		}
 	}
 	lock.RLock()
 	return
@@ -397,49 +398,28 @@ func (ml *OptiLock) RUnlock(lock *sync.RWMutex) {
 	}
 	funcAddr := (uintptr)(unsafe.Pointer(ml))
 	lockAddr := (uintptr)(unsafe.Pointer(lock))
-	idx := getPerceptronIndex(funcAddr, lockAddr)
+	idx := getPerceptronIndex(funcAddr)
+	id2 := getComposedIndex(funcAddr, lockAddr)
 	entry := &weight[_RLOCK_WEIGHT][idx]
-
+	entry2 := &weight[_RLOCK_WEIGHT][id2]
 	if ml.isSlowPath == true {
 		// it is a RWMutex
 		lock.RUnlock()
-		ml.SlowUnlock++
-		timeElapse := rdtsc.Counter() - ml.tsc
 
 		if ml.rtmFails == true {
 			// update the weight since they are not working
-			entry.weightIP = bounded(entry.weightIP, -1)
-			entry.weightLock = bounded(entry.weightLock, -1)
-			entry.failure++
+			entry.weightIP = bounded(entry.weightIP, -2)
+			entry2.weightLock = bounded(entry2.weightLock, -2)
 			if entry.trial > 0 {
-				if timeElapse > uint64(entry.duration*uint32(entry.trial)*2) {
-					entry.duration = uint32(timeElapse)
-				} else {
-					entry.trial--
-				}
+				// entry.trial--
 			}
 		}
 	} else {
 		// it is a rtm
 		TxEnd()
-
-		timeElapse := rdtsc.Counter() - ml.tsc
-
 		// HTM works, update the weight
-		entry.weightIP = bounded(entry.weightIP, int8(entry.trial))
-		entry.weightLock = bounded(entry.weightLock, int8(entry.trial))
-
-		// entry.duration = int(float64(entry.duration) * 0.8)
-		entry.duration += uint32(float64(timeElapse) * float64(entry.trial-entry.remainingTrial))
-		entry.success++
-		if entry.remainingTrial <= 1 {
-			entry.duration = uint32(timeElapse)
-			entry.trial--
-		} else if entry.trial-entry.remainingTrial <= 1 && entry.duration > 2*uint32(timeElapse) {
-			entry.duration = uint32(timeElapse)
-		}
-
-		entry.success++
+		entry.weightIP = bounded(entry.weightIP, 1)
+		entry2.weightLock = bounded(entry2.weightLock, 1)
 	}
 }
 
@@ -457,27 +437,30 @@ func (ml *OptiLock) WLock(lock *sync.RWMutex) {
 	ml.underlyingRWMutex = lock
 	funcAddr := (uintptr)(unsafe.Pointer(ml))
 	lockAddr := (uintptr)(unsafe.Pointer(lock))
-	idx := getPerceptronIndex(funcAddr, lockAddr)
+	idx := getPerceptronIndex(funcAddr)
+	id2 := getComposedIndex(funcAddr, lockAddr)
 	entry := &weight[_WLOCK_WEIGHT][idx]
+	entry2 := &weight[_WLOCK_WEIGHT][id2]
+	entry.remainingTrial = entry.trial
+	noRetry := false
+	spinTime := spinLimit
 	// fast path
 	// localTrial := 1 + entry.trial // 1+ to make sure we are never zero
 
 	if entry.sleep > slowpathRepeatThreshold {
 		reInit(entry)
-		// retry only once on write lock
-		entry.trial = 1
-		entry.remainingTrial = 1
 	}
 
 	// perceptron says to use HTM
-	if goOnSlowPath(entry) {
+	if goOnSlowPath(entry, entry2) {
 		// perceptron says not to use HTM
+		noRetry = true
 		goto _SLOWPATH
 	}
 
 	for {
 		//TODO: can use a switch on the status, if that does not hurt performance due to branch prediction.
-		ml.tsc = rdtsc.Counter()
+		// ml.tsc = rdtsc.Counter()
 		status := TxBegin()
 
 		if status == TxBeginStarted {
@@ -493,26 +476,33 @@ func (ml *OptiLock) WLock(lock *sync.RWMutex) {
 		// abort because lock and unlock do not pair
 		if isUnpairedUnlock(status) || entry.remainingTrial == 0 {
 			ml.rtmFails = true
+			noRetry = true
 			goto _SLOWPATH
 		}
+		// if entry.remainingTrial > 0 {
 		entry.remainingTrial--
-
-		if status&(TxAbortRetry|TxAbortConflict|TxAbortExplicit) != 0 {
+		// }
+		if (status & (TxAbortExplicit | TxAbortRetry | TxAbortConflict)) != 0 {
 			// Spin a bit and then retry
-			loopCnt := int(entry.duration)
-			for i := 0; i < loopCnt; i++ {
-				atomic.LoadInt32(&dummySpinLoad[32])
+			for i := 0; i < spinTime; i++ {
+				// atomic.LoadInt32(&dummySpinLoad[32])
 			}
+			// spinTime <<= 1
+		} else {
+			noRetry = true
+			ml.rtmFails = true
+			goto _SLOWPATH
 		}
 	}
 
 _SLOWPATH:
 	entry.sleep++ // Racey update is OK.
 	ml.isSlowPath = true
-	ml.SlowLock++ // TODO: remove?
-	loopCnt := int(entry.duration)
-	for i := 0; i < loopCnt; i++ {
-		atomic.LoadInt32(&dummySpinLoad[32])
+
+	if noRetry == false {
+		for i := 0; i < spinTime; i++ {
+			// atomic.LoadInt32(&dummySpinLoad[32])
+		}
 	}
 	lock.Lock()
 	return
@@ -532,28 +522,23 @@ func (ml *OptiLock) WUnlock(lock *sync.RWMutex) {
 	}
 	funcAddr := (uintptr)(unsafe.Pointer(ml))
 	lockAddr := (uintptr)(unsafe.Pointer(lock))
-	idx := getPerceptronIndex(funcAddr, lockAddr)
+	idx := getPerceptronIndex(funcAddr)
+	id2 := getComposedIndex(funcAddr, lockAddr)
 	entry := &weight[_WLOCK_WEIGHT][idx]
+	entry2 := &weight[_WLOCK_WEIGHT][id2]
 
 	if ml.isSlowPath == true {
 		// it is a RWMutex
 		lock.Unlock()
-		ml.SlowUnlock++
-		timeElapse := rdtsc.Counter() - ml.tsc
+		// timeElapse := rdtsc.Counter() - ml.tsc
 		// update the weight since they are not working
 
 		// we enter here since we used up all the trials
 		if ml.rtmFails == true {
-			entry.weightIP = bounded(entry.weightIP, -1)
-			entry.weightLock = bounded(entry.weightLock, -1)
-			entry.failure++
+			entry.weightIP = bounded(entry.weightIP, -2)
+			entry2.weightLock = bounded(entry2.weightLock, -2)
 			if entry.trial > 0 {
-				// allows more trial only if the spin time is much shorter than time elapsed.
-				if timeElapse > uint64(entry.duration*uint32(entry.trial)*2) {
-					entry.duration = uint32(timeElapse)
-				} else {
-					entry.trial--
-				}
+				// entry.trial--
 			}
 		}
 	} else {
@@ -562,17 +547,9 @@ func (ml *OptiLock) WUnlock(lock *sync.RWMutex) {
 
 		// HTM works, update the weight
 
-		timeElapse := rdtsc.Counter() - ml.tsc
+		// timeElapse := rdtsc.Counter() - ml.tsc
 
-		entry.weightIP = bounded(entry.weightIP, int8(entry.trial))
-		entry.weightLock = bounded(entry.weightLock, int8(entry.trial))
-		if entry.remainingTrial <= 1 {
-			entry.duration = uint32(timeElapse)
-			entry.trial--
-		} else if entry.trial-entry.remainingTrial <= 1 && entry.duration > 2*uint32(timeElapse) {
-			entry.duration = uint32(timeElapse)
-		}
-
-		entry.success++
+		entry.weightIP = bounded(entry.weightIP, 1)
+		entry2.weightLock = bounded(entry2.weightLock, 1)
 	}
 }
