@@ -35,7 +35,7 @@ import (
 )
 
 // TODO: manual SSA to detect a unique name for the majic lock
-var majicLockName = "optiLock"
+const optiLockName = "optiLock"
 
 var usesMap map[*ast.Ident]types.Object
 var typesMap map[ast.Expr]types.TypeAndValue
@@ -586,7 +586,7 @@ func singlePathContains(singlePath []ast.Node, curPos token.Pos) bool {
 // adds context variable definition at the beginning of the function's statement list
 func addContextInitStmt(stmtsList *[]ast.Stmt, sigPos token.Pos) {
 	newStmt := ast.AssignStmt{
-		Lhs:    []ast.Expr{ast.NewIdent(majicLockName)},
+		Lhs:    []ast.Expr{ast.NewIdent(optiLockName)},
 		TokPos: sigPos, // use concrete position to avoid being split by a comment leading to syntax error
 		Tok:    token.DEFINE,
 		Rhs:    []ast.Expr{ast.NewIdent("rtm.OptiLock{}")}}
@@ -627,7 +627,7 @@ func rewriteAST(f ast.Node, pkg *packages.Package, replacePathRWMutex, insertPat
 								if lockType == "*sync.Mutex" {
 									fun := &ast.SelectorExpr{
 										X: &ast.Ident{
-											Name:    majicLockName,
+											Name:    optiLockName,
 											NamePos: se.X.Pos(),
 										},
 										Sel: se.Sel,
@@ -645,7 +645,7 @@ func rewriteAST(f ast.Node, pkg *packages.Package, replacePathRWMutex, insertPat
 									// branch 4: receiver is promoted field pointer
 									fun := &ast.SelectorExpr{
 										X: &ast.Ident{
-											Name:    majicLockName,
+											Name:    optiLockName,
 											NamePos: se.X.Pos(),
 										},
 										Sel: se.Sel,
@@ -677,7 +677,7 @@ func rewriteAST(f ast.Node, pkg *packages.Package, replacePathRWMutex, insertPat
 									// branch 2: receiver is lock object, need to take its address
 									fun := &ast.SelectorExpr{
 										X: &ast.Ident{
-											Name:    majicLockName,
+											Name:    optiLockName,
 											NamePos: se.X.Pos(),
 										},
 										Sel: se.Sel,
@@ -699,7 +699,7 @@ func rewriteAST(f ast.Node, pkg *packages.Package, replacePathRWMutex, insertPat
 									// branch 3: receiver is some promoted field object
 									fun := &ast.SelectorExpr{
 										X: &ast.Ident{
-											Name:    majicLockName,
+											Name:    optiLockName,
 											NamePos: se.X.Pos(),
 										},
 										Sel: se.Sel,
@@ -736,7 +736,7 @@ func rewriteAST(f ast.Node, pkg *packages.Package, replacePathRWMutex, insertPat
 								if lockType == "*sync.RWMutex" {
 									fun := &ast.SelectorExpr{
 										X: &ast.Ident{
-											Name:    majicLockName,
+											Name:    optiLockName,
 											NamePos: se.X.Pos(),
 										},
 										Sel: &ast.Ident{
@@ -758,7 +758,7 @@ func rewriteAST(f ast.Node, pkg *packages.Package, replacePathRWMutex, insertPat
 									// branch 3: promoted field pointer
 									fun := &ast.SelectorExpr{
 										X: &ast.Ident{
-											Name:    majicLockName,
+											Name:    optiLockName,
 											NamePos: se.X.Pos(),
 										},
 										Sel: &ast.Ident{
@@ -788,7 +788,7 @@ func rewriteAST(f ast.Node, pkg *packages.Package, replacePathRWMutex, insertPat
 									// branch 1: receiver is lock pointer
 									fun := &ast.SelectorExpr{
 										X: &ast.Ident{
-											Name:    majicLockName,
+											Name:    optiLockName,
 											NamePos: se.X.Pos(),
 										},
 										Sel: &ast.Ident{
@@ -810,7 +810,7 @@ func rewriteAST(f ast.Node, pkg *packages.Package, replacePathRWMutex, insertPat
 									// branch 4: lock is called on promoted field pointer
 									fun := &ast.SelectorExpr{
 										X: &ast.Ident{
-											Name:    majicLockName,
+											Name:    optiLockName,
 											NamePos: se.X.Pos(),
 										},
 										Sel: se.Sel,
@@ -844,7 +844,7 @@ func rewriteAST(f ast.Node, pkg *packages.Package, replacePathRWMutex, insertPat
 									// branch 2: receiver is a lock value
 									fun := &ast.SelectorExpr{
 										X: &ast.Ident{
-											Name:    majicLockName,
+											Name:    optiLockName,
 											NamePos: se.X.Pos(),
 										},
 										Sel: &ast.Ident{
@@ -869,7 +869,7 @@ func rewriteAST(f ast.Node, pkg *packages.Package, replacePathRWMutex, insertPat
 									// branch 3: promoted field object
 									fun := &ast.SelectorExpr{
 										X: &ast.Ident{
-											Name:    majicLockName,
+											Name:    optiLockName,
 											NamePos: se.X.Pos(),
 										},
 										Sel: &ast.Ident{
@@ -902,7 +902,7 @@ func rewriteAST(f ast.Node, pkg *packages.Package, replacePathRWMutex, insertPat
 									// branch 2, lock is called on lock value
 									fun := &ast.SelectorExpr{
 										X: &ast.Ident{
-											Name:    majicLockName,
+											Name:    optiLockName,
 											NamePos: se.X.Pos(),
 										},
 										Sel: se.Sel,
@@ -924,7 +924,7 @@ func rewriteAST(f ast.Node, pkg *packages.Package, replacePathRWMutex, insertPat
 									// branch 3: lock is called on promoted field value
 									fun := &ast.SelectorExpr{
 										X: &ast.Ident{
-											Name:    majicLockName,
+											Name:    optiLockName,
 											NamePos: se.X.Pos(),
 										},
 										Sel: se.Sel,
