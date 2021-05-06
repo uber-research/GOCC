@@ -199,16 +199,21 @@ func checkBlockList(rcv *ssa.Value) bool {
 func localCheck(blks []*ssa.BasicBlock) bool {
 	for _, blk := range blks {
 		for _, ins := range blk.Instrs {
+			var callRcv ssa.Value
 			switch ins.(type) {
-			case *ssa.Call, *ssa.Defer:
+			case *ssa.Call:
 				call, _ := ins.(*ssa.Call)
-				callRcv := call.Call.Value
-				if checkBlockList(&callRcv) {
-					return false
-				}
+				callRcv = call.Call.Value
+			case *ssa.Defer:
+				call, _ := ins.(*ssa.Defer)
+				callRcv = call.Call.Value
 			default:
 				continue
 			}
+			if checkBlockList(&callRcv) {
+				return false
+			}
+
 		}
 	}
 	return true
@@ -216,32 +221,38 @@ func localCheck(blks []*ssa.BasicBlock) bool {
 
 // check if single insturction is violating HTM or not
 func checkInst(ins ssa.Instruction) bool {
+	var callRcv ssa.Value
+
 	switch v := ins.(type) {
-	case *ssa.Call, *ssa.Defer:
+	case *ssa.Call:
 		call, _ := v.(*ssa.Call)
-		callRcv := call.Call.Value
-		if checkBlockList(&callRcv) {
-			return false
-		}
-		if mCallGraph == nil {
-			return true
-		}
-		nodeInGraph, ok := mCallGraph.Nodes[curNode]
-		if !ok {
-			return true
-		}
-		for _, edge := range nodeInGraph.Out {
-			if edge.Site.Common().Value.String() == callRcv.String() {
-				if mapFuncSafety[edge.Callee.Func] == false {
-					return false
-				}
-			}
-		}
-		return true
+		callRcv = call.Call.Value
+	case *ssa.Defer:
+		call, _ := v.(*ssa.Defer)
+		callRcv = call.Call.Value
 
 	default:
 		return true
 	}
+
+	if checkBlockList(&callRcv) {
+		return false
+	}
+	if mCallGraph == nil {
+		return true
+	}
+	nodeInGraph, ok := mCallGraph.Nodes[curNode]
+	if !ok {
+		return true
+	}
+	for _, edge := range nodeInGraph.Out {
+		if edge.Site.Common().Value.String() == callRcv.String() {
+			if mapFuncSafety[edge.Callee.Func] == false {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func dfsBlkHelper(blk *ssa.BasicBlock, res *[]*ssa.BasicBlock, visitedBB map[int]bool) {
