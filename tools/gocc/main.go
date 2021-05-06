@@ -447,6 +447,7 @@ func lockAnalysis(ssaF *ssa.Function, lockType string, lock string, unlock strin
 				continue
 			}
 			if !checkInstructionBetween(mapLockToBB[l], setLockIndex[l], setUnlockIndex[ul]) {
+				continue
 			}
 			// check critical section
 			lockUnlockSameBB++
