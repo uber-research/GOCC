@@ -35,7 +35,9 @@ import (
 )
 
 // TODO: manual SSA to detect a unique name for the majic lock
+
 const optiLockName = "optiLock"
+
 
 var usesMap map[*ast.Ident]types.Object
 var typesMap map[ast.Expr]types.TypeAndValue
@@ -47,6 +49,13 @@ var isSingleFile bool
 // and a map to record the name if profile exists
 var profileProvided bool = false
 var hotFuncMap map[string]bool
+
+// this map will mark which lock position and paths are in lambda function
+// since it will have different namescope
+var lockInLambdaFunc map[token.Pos]bool
+
+// this map will keep the all blkstmt position whose parent is funclit
+var blkstmtMap map[token.Pos]bool
 
 // for any lock, lockInfo stores the positions where it locks and (defer) unlocks
 // isValue indicates whether this lock is lock object or pointer in source code
@@ -65,6 +74,9 @@ var lockUnlockSameBB = 0
 var lockDeferUnlockSameBB = 0
 var lockUnlockPairDifferentBB = 0
 var lockDeferUnlockPairDifferentBB = 0
+var unsafeLock = 0
+var unpaired = 0
+var paired = 0
 
 var mPkg map[string]int
 var mBBSafety map[int]bool
@@ -74,6 +86,9 @@ var mapFuncSafety map[*ssa.Function]bool
 var allLockVals map[ssa.Value]bool
 var allUnlockVals map[ssa.Value]bool
 var lockAliasMap map[ssa.Value][]ssa.Value
+var pkgName map[string]bool
+var tokenToName map[token.Pos]string
+var pathToEndNodePos map[ast.Node]token.Pos
 
 var writeOutput bool = true
 var mCallGraph *callgraph.Graph
@@ -82,7 +97,9 @@ var outputPath string
 
 // generate the name of the packages that violates HTM
 func initBlockList() []string {
-	return []string{"sync", "os", "io", "fmt", "runtime"}
+	// return []string{"sync", "os", "io", "fmt", "runtime"}
+	// remove sync to allow nested lock
+	return []string{"os", "io", "fmt", "runtime"}
 }
 
 func isMutexValue(s string) bool {
@@ -110,6 +127,22 @@ func isLockPointer(rcv ssa.Value) bool {
 		} else {
 			// Pointer type
 		}
+	case *ssa.Global:
+		allcTmp := rcv.(*ssa.Global)
+		if isMutexValue(allcTmp.Type().String()) {
+			// is a value
+			isValue = true
+		} else {
+			// is a pointer
+		}
+	case *ssa.FreeVar:
+		allcTmp := rcv.(*ssa.FreeVar)
+		if isMutexValue(allcTmp.Type().String()) {
+			// is a value
+			isValue = true
+		} else {
+			// is a pointer
+		}
 	default:
 		// Pointer type
 	}
@@ -118,6 +151,7 @@ func isLockPointer(rcv ssa.Value) bool {
 
 // count lock, unlock, and defer unlock number
 func countLockNumber(ssaF *ssa.Function, lockType string, lock string, unlock string) bool {
+
 	if ssaF == nil || ssaF.Blocks == nil {
 		return localCheck(ssaF.Blocks)
 	}
@@ -145,6 +179,7 @@ func countLockNumber(ssaF *ssa.Function, lockType string, lock string, unlock st
 				if callRcv != nil && strings.Contains(callRcv.String(), lockType) && call.Call.StaticCallee().Name() == unlock {
 					numDeferUnlock++
 					allUnlockVals[call.Call.Args[0]] = true
+
 				}
 			}
 		}
@@ -189,6 +224,9 @@ func checkBasicBlockInCriticalSection(blks []*ssa.BasicBlock) bool {
 func checkBlockList(rcv *ssa.Value) bool {
 	for _, name := range blockList {
 		if strings.Contains((*rcv).String(), name) {
+			if *rcv != nil {
+				fmt.Println((*rcv).String())
+			}
 			return true
 		}
 	}
@@ -221,6 +259,7 @@ func localCheck(blks []*ssa.BasicBlock) bool {
 
 // check if single insturction is violating HTM or not
 func checkInst(ins ssa.Instruction) bool {
+
 	var callRcv ssa.Value
 
 	switch v := ins.(type) {
@@ -249,6 +288,7 @@ func checkInst(ins ssa.Instruction) bool {
 		if edge.Site.Common().Value.String() == callRcv.String() {
 			if mapFuncSafety[edge.Callee.Func] == false {
 				return false
+
 			}
 		}
 	}
@@ -379,6 +419,14 @@ func normalizeFunctionName(name string) string {
 	return fName
 }
 
+// return if the ssa function is in the given input package so that we can transform
+func inFile(ssaF *ssa.Function) bool {
+	if _, ok := pkgName[ssaF.Pkg.Pkg.Name()]; ok {
+		return true
+	}
+	return false
+}
+
 // Find all paired locks in given function.
 // return a set of lockInfo for rewrite
 // currently it checks 4 patterns:
@@ -389,6 +437,10 @@ func normalizeFunctionName(name string) string {
 func lockAnalysis(ssaF *ssa.Function, lockType string, lock string, unlock string) map[string]lockInfo {
 	// lockMap to return from this function
 	var lockMap = map[string]lockInfo{}
+
+	if ssaF == nil || inFile(ssaF) == false {
+		return lockMap
+	}
 
 	// store all lock/unlocks instructions in sets
 	setLock := make(map[*ssa.CallCommon]bool)
@@ -448,6 +500,7 @@ func lockAnalysis(ssaF *ssa.Function, lockType string, lock string, unlock strin
 		}
 	}
 
+
 	// start the lock analysis
 	// lock and unlock in the same block, add instruction in between as critical section
 	for ul := range setUnlock {
@@ -456,6 +509,7 @@ func lockAnalysis(ssaF *ssa.Function, lockType string, lock string, unlock strin
 			lRcv := l.Args[0].String()
 			if !isSameLock(l.Args[0], ul.Args[0]) || (mapLockToBB[l] != mapUnlockToBB[ul]) {
 				continue
+
 			}
 			if !checkInstructionBetween(mapLockToBB[l], setLockIndex[l], setUnlockIndex[ul]) {
 				continue
@@ -486,6 +540,7 @@ func lockAnalysis(ssaF *ssa.Function, lockType string, lock string, unlock strin
 				safetyInBB = checkInstructionBetween(mapLockToBB[l], setLockIndex[l], setDeferUnlockIndex[ul]) && checkInstructionBetween(mapLockToBB[l], setDeferUnlockIndex[ul], blkInstNum)
 			} else {
 				safetyInBB = checkInstructionBetween(mapLockToBB[l], setLockIndex[l], blkInstNum)
+
 			}
 			if !safetyInBB || !checkBasicBlockInCriticalSection(lstBlk) {
 				continue
@@ -496,6 +551,7 @@ func lockAnalysis(ssaF *ssa.Function, lockType string, lock string, unlock strin
 			addLockPairToLockInfo(lockMap, lRcv, l, ul, ssaF)
 		}
 	}
+
 
 	postDomMap := postDom.PostDominators(ssaF)
 	// lock and and unlock in different bb, but dominates and post-dominates each other
@@ -528,6 +584,7 @@ func lockAnalysis(ssaF *ssa.Function, lockType string, lock string, unlock strin
 				setUnlock[ul] = false
 				setLock[l] = false
 				addLockPairToLockInfo(lockMap, lRcv, l, ul, ssaF)
+
 			}
 		}
 	}
@@ -563,6 +620,7 @@ func lockAnalysis(ssaF *ssa.Function, lockType string, lock string, unlock strin
 					setLock[l] = false
 					addLockPairToLockInfo(lockMap, lRcv, l, ul, ssaF)
 				}
+
 			} else if isSameLock(l.Args[0], ul.Args[0]) && unlockBB.Dominates(lockBB) {
 				// add this since defer unlock can happen before lock
 				ulkPD := postDomMap[mapLockToBB[ul].Index]
@@ -578,10 +636,31 @@ func lockAnalysis(ssaF *ssa.Function, lockType string, lock string, unlock strin
 					setDeferUnlock[ul] = false
 					setLock[l] = false
 					addLockPairToLockInfo(lockMap, lRcv, l, ul, ssaF)
+
 				}
 			}
 		}
 	}
+
+	for _, v := range setLock {
+		if v == true {
+			unpaired++
+		}
+	}
+	for _, v := range setUnlock {
+		if v == true {
+			unpaired++
+		}
+	}
+	for _, v := range setDeferUnlock {
+		if v == true {
+			unpaired++
+		}
+	}
+	numLock += len(setLock)
+	numUnlock += len(setUnlock)
+	numDeferUnlock += len(setDeferUnlock)
+
 	return lockMap
 }
 
@@ -590,6 +669,38 @@ func pathContains(replacePath [][]ast.Node, curPos token.Pos) bool {
 		for _, node := range path {
 			if node.Pos() == curPos {
 				return true
+			}
+		}
+	}
+	return false
+}
+
+func getPosName(path [][]ast.Node, curPos token.Pos, posToID map[token.Pos]string) string {
+	for _, p := range path {
+		for _, node := range p {
+			if node.Pos() == curPos {
+				for _, n := range p {
+					if str, ok := posToID[pathToEndNodePos[n]]; ok {
+						return str
+					}
+				}
+			}
+		}
+	}
+	return ""
+}
+
+func reversePathContains(replacePath [][]ast.Node, curPos token.Pos) bool {
+	for _, path := range replacePath {
+	_PATHLOOP:
+		for i := 0; i < len(path); i++ {
+			switch n := path[i].(type) {
+			case *ast.BlockStmt:
+				if n.Pos() == curPos {
+					return true
+				} else if _, ok := blkstmtMap[n.Pos()]; ok {
+					break _PATHLOOP
+				}
 			}
 		}
 	}
@@ -606,6 +717,7 @@ func singlePathContains(singlePath []ast.Node, curPos token.Pos) bool {
 }
 
 // adds context variable definition at the beginning of the function's statement list
+
 func addContextInitStmt(stmtsList *[]ast.Stmt, sigPos token.Pos) {
 	newStmt := ast.AssignStmt{
 		Lhs:    []ast.Expr{ast.NewIdent(optiLockName)},
@@ -616,6 +728,7 @@ func addContextInitStmt(stmtsList *[]ast.Stmt, sigPos token.Pos) {
 	newStmtsList = append(newStmtsList, &newStmt)
 	newStmtsList = append(newStmtsList, (*stmtsList)...)
 	*stmtsList = newStmtsList
+
 }
 
 // given the function f from the pkg, replace all the valid lock/unlock with htm library
@@ -630,9 +743,11 @@ func addContextInitStmt(stmtsList *[]ast.Stmt, sigPos token.Pos) {
 // foo := Foo{}
 // foo.Lock()
 // 4. Promoted field pointer
-func rewriteAST(f ast.Node, pkg *packages.Package, replacePathRWMutex, insertPathRWMutex, replacePathMutex, insertPathMutex *[][]ast.Node) ast.Node {
+func rewriteAST(f ast.Node, pkg *packages.Package, replacePathRWMutex, insertPathRWMutex, replacePathMutex, insertPathMutex, lambdaPath, normalPath *[][]ast.Node, posToID map[token.Pos]string) ast.Node {
 	fmt.Println("  Rewriting field accesses in the file...")
 	blkmap := make(map[*ast.BlockStmt]bool)
+	addImport := false
+	optilockNumber := len(posToID) / 2
 	postFunc := func(c *astutil.Cursor) bool {
 		node := c.Node()
 		switch n := node.(type) {
@@ -659,6 +774,7 @@ func rewriteAST(f ast.Node, pkg *packages.Package, replacePathRWMutex, insertPat
 									NamePos: se.X.Pos(),
 								},
 								Sel: se.Sel,
+
 							}
 							call := &ast.CallExpr{
 								Fun:      fun,
@@ -792,6 +908,7 @@ func rewriteAST(f ast.Node, pkg *packages.Package, replacePathRWMutex, insertPat
 									Args:     []ast.Expr{se.X},
 									Ellipsis: token.NoPos,
 									Rparen:   token.NoPos,
+
 								}
 
 								c.Replace(call)
@@ -911,6 +1028,7 @@ func rewriteAST(f ast.Node, pkg *packages.Package, replacePathRWMutex, insertPat
 									Args:     []ast.Expr{newX},
 									Ellipsis: token.NoPos,
 									Rparen:   token.NoPos,
+
 								}
 
 								c.Replace(call)
@@ -1005,6 +1123,7 @@ func rewriteAST(f ast.Node, pkg *packages.Package, replacePathRWMutex, insertPat
 			{
 				if n.Path.Value != "\"sync\"" {
 					return true
+
 				}
 				newImport := &ast.ImportSpec{
 					Doc:  n.Doc,
@@ -1175,7 +1294,13 @@ func main() {
 	// this map stores the hot function from the profiling
 	hotFuncMap = make(map[string]bool)
 
+	lockInLambdaFunc = make(map[token.Pos]bool)
+	blkstmtMap = make(map[token.Pos]bool)
+
 	mPkg = make(map[string]int)
+	pkgName = make(map[string]bool)
+	tokenToName = make(map[token.Pos]string)
+	pathToEndNodePos = make(map[ast.Node]token.Pos)
 
 	// lock positions to rewrite
 	replacedRWMutexPtr := make(map[token.Pos]bool)
@@ -1194,6 +1319,8 @@ func main() {
 	flag.StringVar(&profilePath, "profile", "", "profiling of hot function")
 
 	syntheticPtr := flag.Bool("synthetic", false, "set true if the synthetic main from transformer is used")
+
+	rewriteTestFile := flag.Bool("rewriteTest", false, "set true if you want to change testing file")
 
 	flag.Parse()
 
@@ -1249,10 +1376,14 @@ func main() {
 		panic("something wrong during loading!")
 	}
 
+	for _, pkg := range pkgs {
+		pkgName[pkg.Name] = true
+	}
+
 	prog, ssapkgs := ssautil.AllPackages(pkgs, ssa.NaiveForm|ssa.GlobalDebug)
 	// prog, ssapkgs := ssautil.AllPackages(pkgs, ssa.GlobalDebug)
 	libbuilder.BuildPackages(prog, ssapkgs, true, true)
-	mCallGraph := libcg.BuildRtaCG(prog, false)
+	mCallGraph := libcg.BuildRtaCG(prog, true)
 
 	// TODO: first pass on optimized form and second pass on naive form to check if it is a value or object
 
@@ -1280,7 +1411,8 @@ func main() {
 			curNode = node
 			postDom.GetExit(node)
 			lockInfoMap := lockAnalysis(node, lockType, lockFuncName, unlockFuncName)
-			for _, value := range lockInfoMap {
+			isLambda := strings.Contains(node.RelString(node.Pkg.Pkg), "$")
+			for lkName, value := range lockInfoMap {
 				// if this is not a same lock, don't replace.
 				// TODO: fix this
 				if checkSameLock(value, pkgs) == false {
@@ -1293,17 +1425,33 @@ func main() {
 						// a RWMutex pointer not a value
 						for _, item := range value.lockPosition {
 							replacedRWMutexPtr[item] = true
+							tokenToName[item] = lkName
+							if isLambda {
+								lockInLambdaFunc[item] = true
+							}
 						}
 						for _, item := range value.unlockPosition {
 							replacedRWMutexPtr[item] = true
+							tokenToName[item] = lkName
+							if isLambda {
+								lockInLambdaFunc[item] = true
+							}
 						}
 					} else {
 						// a RWMutex value
 						for _, item := range value.lockPosition {
 							replacedRWMutexVal[item] = true
+							tokenToName[item] = lkName
+							if isLambda {
+								lockInLambdaFunc[item] = true
+							}
 						}
 						for _, item := range value.unlockPosition {
 							replacedRWMutexVal[item] = true
+							tokenToName[item] = lkName
+							if isLambda {
+								lockInLambdaFunc[item] = true
+							}
 						}
 					}
 				} else {
@@ -1311,17 +1459,33 @@ func main() {
 						// a Mutex pointer not a value
 						for _, item := range value.lockPosition {
 							replacedMutexPtr[item] = true
+							tokenToName[item] = lkName
+							if isLambda {
+								lockInLambdaFunc[item] = true
+							}
 						}
 						for _, item := range value.unlockPosition {
 							replacedMutexPtr[item] = true
+							tokenToName[item] = lkName
+							if isLambda {
+								lockInLambdaFunc[item] = true
+							}
 						}
 					} else {
 						// a Mutex value
 						for _, item := range value.lockPosition {
 							replacedMutexVal[item] = true
+							tokenToName[item] = lkName
+							if isLambda {
+								lockInLambdaFunc[item] = true
+							}
 						}
 						for _, item := range value.unlockPosition {
 							replacedMutexVal[item] = true
+							tokenToName[item] = lkName
+							if isLambda {
+								lockInLambdaFunc[item] = true
+							}
 						}
 					}
 				}
@@ -1333,36 +1497,101 @@ func main() {
 		usesMap = pkg.TypesInfo.Uses
 		typesMap = pkg.TypesInfo.Types
 		for _, file := range pkg.Syntax {
+			nameToID := make(map[string]string)
+			posToID := make(map[token.Pos]string)
+			id := 0
+			// don't rewrite testing file by default
+			if *rewriteTestFile == false {
+				fName := pkg.Fset.Position(file.Pos()).Filename
+				if strings.HasSuffix(fName, "_test.go") {
+					// fmt.Printf("%v is skipped since it is a testing file\n", fName)
+					continue
+				}
+			}
+
 			// replacePath means the lock is a pointer so we can replace it directly
 			// insertPath indicates the lock is a value and we need to take the address of it.
 			replacePathRWMutex := make([][]ast.Node, 0)
 			insertPathRWMutex := make([][]ast.Node, 0)
 			replacePathMutex := make([][]ast.Node, 0)
 			insertPathMutex := make([][]ast.Node, 0)
-
+			lambdaPath := make([][]ast.Node, 0)
+			normalPath := make([][]ast.Node, 0)
 			for l := range replacedRWMutexPtr {
 				path, ok := astutil.PathEnclosingInterval(file, l, l)
 				if ok {
+					pathToEndNodePos[path[0]] = l
 					replacePathRWMutex = append(replacePathRWMutex, path)
+					if _, ok := lockInLambdaFunc[l]; ok {
+						lambdaPath = append(lambdaPath, path)
+					} else {
+						normalPath = append(normalPath, path)
+					}
+					if val, ok := nameToID[tokenToName[l]]; ok {
+						posToID[l] = val
+					} else {
+						nameToID[tokenToName[l]] = strconv.Itoa(id)
+						posToID[l] = strconv.Itoa(id)
+						id++
+					}
 				}
 			}
 			for l := range replacedRWMutexVal {
 				path, ok := astutil.PathEnclosingInterval(file, l, l)
 				if ok {
+					pathToEndNodePos[path[0]] = l
 					insertPathRWMutex = append(insertPathRWMutex, path)
+					if _, ok := lockInLambdaFunc[l]; ok {
+						lambdaPath = append(lambdaPath, path)
+					} else {
+						normalPath = append(normalPath, path)
+					}
+					if val, ok := nameToID[tokenToName[l]]; ok {
+						posToID[l] = val
+					} else {
+						nameToID[tokenToName[l]] = strconv.Itoa(id)
+						posToID[l] = strconv.Itoa(id)
+						id++
+					}
 				}
 			}
 
 			for l := range replacedMutexPtr {
 				path, ok := astutil.PathEnclosingInterval(file, l, l)
 				if ok {
+					pathToEndNodePos[path[0]] = l
 					replacePathMutex = append(replacePathMutex, path)
+					if _, ok := lockInLambdaFunc[l]; ok {
+						lambdaPath = append(lambdaPath, path)
+					} else {
+						normalPath = append(normalPath, path)
+					}
+					if val, ok := nameToID[tokenToName[l]]; ok {
+						posToID[l] = val
+					} else {
+						nameToID[tokenToName[l]] = strconv.Itoa(id)
+						posToID[l] = strconv.Itoa(id)
+						id++
+					}
 				}
 			}
 			for l := range replacedMutexVal {
 				path, ok := astutil.PathEnclosingInterval(file, l, l)
 				if ok {
+					pathToEndNodePos[path[0]] = l
 					insertPathMutex = append(insertPathMutex, path)
+					if _, ok := lockInLambdaFunc[l]; ok {
+						lambdaPath = append(lambdaPath, path)
+					} else {
+						normalPath = append(normalPath, path)
+					}
+					if val, ok := nameToID[tokenToName[l]]; ok {
+						posToID[l] = val
+					} else {
+						nameToID[tokenToName[l]] = strconv.Itoa(id)
+						posToID[l] = strconv.Itoa(id)
+						id++
+					}
 				}
 			}
 
@@ -1372,7 +1601,8 @@ func main() {
 			}
 			if numberOfLocksToChange > 0 && writeOutput {
 				fmt.Printf("Number of locks to rewrite %v\n", numberOfLocksToChange)
-				ast := rewriteAST(file, pkg, &replacePathRWMutex, &insertPathRWMutex, &replacePathMutex, &insertPathMutex)
+				collectBlkstmt(file, pkg)
+				ast := rewriteAST(file, pkg, &replacePathRWMutex, &insertPathRWMutex, &replacePathMutex, &insertPathMutex, &lambdaPath, &normalPath, posToID)
 				filename := prog.Fset.Position(ast.Pos()).Filename
 				writeAST(ast, inputFile, pkg, filename)
 			}
@@ -1397,6 +1627,9 @@ func main() {
 		fmt.Fprintln(w, "Defer lock pairs in same BB: ", lockDeferUnlockSameBB)
 		fmt.Fprintln(w, "Lock pairs dominate each other: ", lockUnlockPairDifferentBB)
 		fmt.Fprintln(w, "Defer Lock pairs dominate each other: ", lockDeferUnlockPairDifferentBB)
+		fmt.Fprintln(w, "Unsafe lock instructions that are dropped: ", unsafeLock)
+		fmt.Fprintln(w, "Unpaired locks: ", unpaired)
+		fmt.Fprintln(w, "Paired locks: ", paired)
 
 		w.Flush()
 
