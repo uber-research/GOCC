@@ -214,9 +214,6 @@ func checkBasicBlockInCriticalSection(blks []*ssa.BasicBlock) bool {
 func checkBlockList(rcv *ssa.Value) bool {
 	for _, name := range blockList {
 		if strings.Contains((*rcv).String(), name) {
-			if *rcv != nil {
-				fmt.Println((*rcv).String())
-			}
 			return true
 		}
 	}
@@ -227,14 +224,12 @@ func checkBlockList(rcv *ssa.Value) bool {
 func localCheck(blks []*ssa.BasicBlock) bool {
 	for _, blk := range blks {
 		for _, ins := range blk.Instrs {
-			if call, ok := ins.(*ssa.Call); ok {
-				callRcv := call.Call.Value
-				if checkBlockList(&callRcv) {
+			if _, ok := ins.(*ssa.Call); ok {
+				if checkInst(ins) {
 					return false
 				}
-			} else if call, ok := ins.(*ssa.Defer); ok {
-				callRcv := call.Call.Value
-				if checkBlockList(&callRcv) {
+			} else if _, ok := ins.(*ssa.Defer); ok {
+				if checkInst(ins) {
 					return false
 				}
 			}
