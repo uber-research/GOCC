@@ -1337,7 +1337,7 @@ func main() {
 	prog, ssapkgs := ssautil.AllPackages(pkgs, ssa.NaiveForm|ssa.GlobalDebug)
 	// prog, ssapkgs := ssautil.AllPackages(pkgs, ssa.GlobalDebug)
 	libbuilder.BuildPackages(prog, ssapkgs, true, true)
-	mCallGraph := libcg.BuildRtaCG(prog, true)
+	mCallGraph = libcg.BuildRtaCG(prog, true)
 
 	// TODO: first pass on optimized form and second pass on naive form to check if it is a value or object
 
