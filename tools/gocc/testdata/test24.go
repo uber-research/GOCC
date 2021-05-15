@@ -10,15 +10,16 @@ package main
 
 import "sync"
 
-func foo(m, n *sync.Mutex) {
-	m.Lock()
-	n.Lock()
-	m.Unlock()
-	n.Unlock()
+var m [2]sync.Mutex
+
+func HoH() {
+	m[0].Lock()
+	m[1].Lock()
+	m[0].Unlock()
+	m[1].Unlock()
 }
 
 // test different types of Locks
 func main() {
-	m := sync.Mutex{}
-	foo(&m, &m)
+	HoH()
 }

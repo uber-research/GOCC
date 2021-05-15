@@ -26,7 +26,6 @@ import (
 
 	libbuilder "github.com/uber-research/GOCC/lib/builder"
 	libcg "github.com/uber-research/GOCC/lib/callgraph"
-	postDom "github.com/uber-research/GOCC/tools/gocc/cfg"
 	"golang.org/x/tools/go/ast/astutil"
 	"golang.org/x/tools/go/callgraph"
 	"golang.org/x/tools/go/packages"
@@ -47,7 +46,7 @@ var isSingleFile bool
 // this flag indicates whether profile is provided or not
 // and a map to record the name if profile exists
 var profileProvided bool = false
-var hotFuncMap map[string]bool
+var hotFuncMap map[string]empty = map[string]empty{}
 
 // this map will mark which lock position and paths are in lambda function
 // since it will have different namescope
@@ -86,7 +85,7 @@ var allLockVals map[ssa.Value]bool
 var allUnlockVals map[ssa.Value]bool
 var lockAliasMap map[ssa.Value][]ssa.Value
 var pkgName map[string]bool
-var tokenToName map[token.Pos]string
+var tokenToLuPair map[token.Pos]*luPair = map[token.Pos]*luPair{}
 var pathToEndNodePos map[ast.Node]token.Pos
 
 var writeOutput bool = true
@@ -95,11 +94,8 @@ var curNode *ssa.Function
 var outputPath string
 
 // generate the name of the packages that violates HTM
-func initBlockList() []string {
-	// return []string{"sync", "os", "io", "fmt", "runtime"}
-	// remove sync to allow nested lock
-	return []string{"os", "io", "fmt", "runtime"}
-}
+var _blockList []string = []string{"os.", "io.", "fmt.", "runtime.", "syscall."}
+var _blockedPkg []string = []string{"os", "io", "fmt", "runtime", "syscall"}
 
 func isMutexValue(s string) bool {
 	mutexTypes := []string{"*sync.Mutex", "*sync.RWMutex"}
@@ -148,143 +144,50 @@ func isLockPointer(rcv ssa.Value) bool {
 	return isValue
 }
 
-// count lock, unlock, and defer unlock number
-func countLockNumber(ssaF *ssa.Function, lockType string, lock string, unlock string) bool {
-	if ssaF != nil && ssaF.Blocks != nil {
-		for _, blk := range ssaF.Blocks {
-			for _, ins := range blk.Instrs {
-				if call, ok := ins.(*ssa.Call); ok {
-					if !call.Call.IsInvoke() && call.Call.StaticCallee() != nil {
-						calleeName := call.Call.StaticCallee().Name()
-						callRcv := call.Call.Value
-						if callRcv != nil && strings.Contains(callRcv.String(), lockType) && calleeName == lock {
-							allLockVals[call.Call.Args[0]] = true
-						} else if callRcv != nil && strings.Contains(callRcv.String(), lockType) && call.Call.StaticCallee().Name() == unlock {
-							allUnlockVals[call.Call.Args[0]] = true
-						}
-					}
-				} else if call, ok := ins.(*ssa.Defer); ok {
-					if call.Call.StaticCallee() != nil {
-						callRcv := call.Call.Value
-						if callRcv != nil && strings.Contains(callRcv.String(), lockType) && call.Call.StaticCallee().Name() == unlock {
-							allUnlockVals[call.Call.Args[0]] = true
-						}
-					}
-				}
-			}
-		}
-	}
-	return localCheck(ssaF.Blocks)
-}
-
-// check if any instructions in the critical section is voilated HTM
-// placeholder for now
-func checkInstructionBetween(b *ssa.BasicBlock, startIdx, endIdx int) bool {
-	for i := startIdx + 1; i < endIdx; i++ {
-		if checkInst(b.Instrs[i]) == false {
-			return false
-		}
-	}
-	return true
-}
-
-// check if all the given bb is safe to transform
-func checkBasicBlockInCriticalSection(blks []*ssa.BasicBlock) bool {
-	for _, blk := range blks {
-		// if we know this BB is unsafe, then entire critical section is not safe
-		if val, ok := mBBSafety[blk.Index]; ok {
-			if val == false {
-				return false
-			}
-		}
-		// check every instruction in current BB
-		for _, ins := range blk.Instrs {
-			if checkInst(ins) == false {
-				// mark this block as unsafe and return
-				mBBSafety[blk.Index] = false
-				return false
-			}
-		}
-		// if we reach to this point, this block is safe
-		mBBSafety[blk.Index] = true
-	}
-	return true
-}
-
-func checkBlockList(rcv *ssa.Value) bool {
-	for _, name := range blockList {
-		if strings.Contains((*rcv).String(), name) {
-			if *rcv != nil {
-				fmt.Println((*rcv).String())
-			}
+//TODO(milind): seems incorrect. Probably, we should base it on the Type.
+func checkBlockList(rcv ssa.Value) bool {
+	for _, name := range _blockList {
+		if strings.HasPrefix(rcv.String(), name) {
 			return true
 		}
 	}
 	return false
 }
 
-// check all ins in the basic block except callee
-func localCheck(blks []*ssa.BasicBlock) bool {
-	for _, blk := range blks {
-		for _, ins := range blk.Instrs {
-			if call, ok := ins.(*ssa.Call); ok {
-				callRcv := call.Call.Value
-				if checkBlockList(&callRcv) {
-					return false
-				}
-			} else if call, ok := ins.(*ssa.Defer); ok {
-				callRcv := call.Call.Value
-				if checkBlockList(&callRcv) {
-					return false
-				}
-			}
+func checkBlockListStr(pkg *ssa.Package) bool {
+	for _, name := range _blockedPkg {
+		if pkg.Pkg.Name() == name {
+			return true
 		}
 	}
-	return true
+	return false
 }
 
-// check if single insturction is violating HTM or not
-func checkInst(ins ssa.Instruction) bool {
-	// no go func() in the critical section
-	if _, ok := ins.(*ssa.Go); ok {
+// TODO: This is not correct.
+// In reality, we should check all callees of f, and disqualify it if we see calls to an unwanted function.
+// For example, see lib/callgraph/builtin.go  for the set of build-in functions called, which do NOT emerge from a call instruction.
+// For simplicity, we inspect only the call instructions and mark the calls to certain packages (fmt, io, runtime, ...) as unsafe.
+
+func unsafeInst(ins ssa.Instruction, cgNode *callgraph.Node) bool {
+	call, ok := ins.(ssa.CallInstruction)
+	if !ok {
 		return false
 	}
-	if call, ok := ins.(*ssa.Call); ok {
-		callRcv := call.Call.Value
-		if checkBlockList(&callRcv) {
-			return false
-		}
-		if mCallGraph != nil {
-			nodeInGraph, ok := mCallGraph.Nodes[curNode]
-			if ok {
-				for _, edge := range nodeInGraph.Out {
-					if edge.Site.Common().Value.String() == callRcv.String() {
-						if mapFuncSafety[edge.Callee.Func] == false {
-							return false
-						}
-					}
-				}
-			}
-		}
-	} else if call, ok := ins.(*ssa.Defer); ok {
-		callRcv := call.Call.Value
-		if checkBlockList(&callRcv) {
-			return false
-		}
-		if mCallGraph != nil {
-			nodeInGraph, ok := mCallGraph.Nodes[curNode]
-			if ok {
-				for _, edge := range nodeInGraph.Out {
-					if edge.Site.Common().Value.String() == callRcv.String() {
-						if mapFuncSafety[edge.Callee.Func] == false {
-							return false
-						}
-					}
+
+	callRcv := call.Common().Value
+	if callRcv != nil && checkBlockList(callRcv) {
+		return true
+	}
+	if cgNode != nil {
+		for _, edge := range cgNode.Out {
+			if edge.Site == ins {
+				if checkBlockListStr(edge.Callee.Func.Pkg) {
+					return true
 				}
 			}
 		}
 	}
-	return true
+	return false
 }
 
 func dfsBlkHelper(blk *ssa.BasicBlock, res *[]*ssa.BasicBlock, visitedBB map[int]bool) {
@@ -349,31 +252,21 @@ func domContains(array []int, item int) bool {
 }
 
 // add paired lock/unlock position in lockInfo
-func addLockPairToLockInfo(lockMap map[string]lockInfo, lRcv string, l, ul *ssa.CallCommon, ssaF *ssa.Function) {
-	pkgPath := ssaF.Pkg.Pkg.Path()
+func isHotFunction(f *ssa.Function) bool {
+	pkgPath := f.Pkg.Pkg.Path()
 	splits := strings.Split(normalizeFunctionName(pkgPath), "/")
 	canonicalName := splits[len(splits)-1]
-	funcName := normalizeFunctionName(ssaF.RelString(ssaF.Pkg.Pkg))
+	funcName := normalizeFunctionName(f.RelString(f.Pkg.Pkg))
 	fullFuncName := canonicalName + "." + funcName
 
-	if _, ok := hotFuncMap[fullFuncName]; !ok && profileProvided {
-		return
+	if !profileProvided {
+		return true
 	}
-	if lkInfo, ok := lockMap[lRcv]; ok {
-		lkInfo.lockPosition = append(lkInfo.lockPosition, l.Pos())
-		lkInfo.unlockPosition = append(lkInfo.unlockPosition, ul.Pos())
-		if isLockPointer(l.Args[0]) {
-			lkInfo.isValue = true
-		}
-	} else {
-		a := lockInfo{}
-		a.lockPosition = append(a.lockPosition, l.Pos())
-		a.unlockPosition = append(a.unlockPosition, ul.Pos())
-		if isLockPointer(l.Args[0]) {
-			a.isValue = true
-		}
-		lockMap[lRcv] = a
+
+	if _, ok := hotFuncMap[fullFuncName]; !ok {
+		return false
 	}
+	return true
 }
 
 // check if two lock receivers are the same, including aliasing analysis
@@ -417,235 +310,6 @@ func inFile(ssaF *ssa.Function) bool {
 		return true
 	}
 	return false
-}
-
-// Find all paired locks in given function.
-// return a set of lockInfo for rewrite
-// currently it checks 4 patterns:
-// 1. lock/unlock in same basic block
-// 2. lock/defer unlock in same basic block
-// 3. lock/unlock in different basic block
-// 4. lock/defer unlock in different basic block
-func lockAnalysis(ssaF *ssa.Function, lockType string, lock string, unlock string) map[string]lockInfo {
-	// lockMap to return from this function
-	var lockMap = map[string]lockInfo{}
-
-	if ssaF == nil || inFile(ssaF) == false {
-		return lockMap
-	}
-
-	// store all lock/unlocks instructions in sets
-	setLock := make(map[*ssa.CallCommon]bool)
-	setUnlock := make(map[*ssa.CallCommon]bool)
-	setDeferUnlock := make(map[*ssa.CallCommon]bool)
-
-	// map stores which BB is the lock/unlock instruction belongs to
-	mapLockToBB := make(map[*ssa.CallCommon]*ssa.BasicBlock)
-	mapUnlockToBB := make(map[*ssa.CallCommon]*ssa.BasicBlock)
-	mapDeferUnlockToBB := make(map[*ssa.CallCommon]*ssa.BasicBlock)
-
-	// indicate the index of lock/unlock instruction within the BB
-	setLockIndex := make(map[*ssa.CallCommon]int)
-	setUnlockIndex := make(map[*ssa.CallCommon]int)
-	setDeferUnlockIndex := make(map[*ssa.CallCommon]int)
-
-	if ssaF != nil && ssaF.Blocks != nil {
-		// detect lock/unlock and its declaration
-		for _, blk := range ssaF.Blocks {
-			for idx, ins := range blk.Instrs {
-				if call, ok := ins.(*ssa.Call); ok {
-					if !call.Call.IsInvoke() && call.Call.StaticCallee() != nil {
-						calleeName := call.Call.StaticCallee().Name()
-						callRcv := call.Call.Value
-						// lock/unlock detected
-						if callRcv != nil && strings.Contains(callRcv.String(), lockType) && calleeName == lock {
-							setLock[&call.Call] = true
-							mapLockToBB[&call.Call] = blk
-							setLockIndex[&call.Call] = idx
-						} else if callRcv != nil && strings.Contains(callRcv.String(), lockType) && call.Call.StaticCallee().Name() == unlock {
-							mapUnlockToBB[&call.Call] = blk
-							setUnlock[&call.Call] = true
-							setUnlockIndex[&call.Call] = idx
-						}
-					}
-				} else if call, ok := ins.(*ssa.Defer); ok {
-					if call.Call.StaticCallee() != nil {
-						callRcv := call.Call.Value
-						if callRcv != nil && strings.Contains(callRcv.String(), lockType) && call.Call.StaticCallee().Name() == unlock {
-							mapDeferUnlockToBB[&call.Call] = blk
-							setDeferUnlock[&call.Call] = true
-							setDeferUnlockIndex[&call.Call] = idx
-						}
-					}
-				}
-			}
-		}
-
-		// start the lock analysis
-		// lock and unlock in the same block, add instruction in between as critical section
-		for ul := range setUnlock {
-			// ulRcv := ul.Args[0].String()
-			for l := range setLock {
-				if setLockIndex[l] > setUnlockIndex[ul] {
-					continue
-				}
-				lRcv := l.Args[0].String()
-				if isSameLock(l.Args[0], ul.Args[0]) && mapLockToBB[l] == mapUnlockToBB[ul] {
-					// check critical section
-					paired++
-					if checkInstructionBetween(mapLockToBB[l], setLockIndex[l], setUnlockIndex[ul]) {
-						lockUnlockSameBB++
-						setUnlock[ul] = false
-						setLock[l] = false
-						addLockPairToLockInfo(lockMap, lRcv, l, ul, ssaF)
-					} else {
-						unsafeLock++
-					}
-				}
-			}
-		}
-
-		// lock and defer unlock in the same block
-		for ul := range setDeferUnlock {
-			// ulRcv := ul.Args[0].String()
-			for l := range setLock {
-				lRcv := l.Args[0].String()
-				if isSameLock(l.Args[0], ul.Args[0]) && mapLockToBB[l] == mapDeferUnlockToBB[ul] {
-					paired++
-					// critical section is all reachable blocks from this block plus the remaining instruction after unlock
-					lstBlk := reachableBlks(mapLockToBB[l])
-					blkInstNum := len(mapLockToBB[l].Instrs)
-					safetyInBB := false
-					// add this since defer unlock can be used before lock
-					if setLockIndex[l] < setDeferUnlockIndex[ul] {
-						safetyInBB = checkInstructionBetween(mapLockToBB[l], setLockIndex[l], setDeferUnlockIndex[ul]) && checkInstructionBetween(mapLockToBB[l], setDeferUnlockIndex[ul], blkInstNum)
-					} else {
-						safetyInBB = checkInstructionBetween(mapLockToBB[l], setLockIndex[l], blkInstNum)
-					}
-					if safetyInBB && checkBasicBlockInCriticalSection(lstBlk) {
-						lockDeferUnlockSameBB++
-						setDeferUnlock[ul] = false
-						setLock[l] = false
-						addLockPairToLockInfo(lockMap, lRcv, l, ul, ssaF)
-					} else {
-						unsafeLock++
-					}
-				}
-			}
-		}
-
-		postDomMap := postDom.PostDominators(ssaF)
-		// lock and and unlock in different bb, but dominates and post-dominates each other
-		for ul := range setUnlock {
-			// ulRcv := ul.Args[0].String()
-			for l := range setLock {
-				lRcv := l.Args[0].String()
-				lockBB, ok := mapLockToBB[l]
-				if ok == false {
-					break
-				}
-				unlockBB, ok := mapUnlockToBB[ul]
-				if ok == false {
-					break
-				}
-				if isSameLock(l.Args[0], ul.Args[0]) && lockBB.Dominates(unlockBB) {
-					paired++
-					lkPD := postDomMap[mapLockToBB[l].Index]
-					if domContains(lkPD, mapUnlockToBB[ul].Index) {
-						// critical section is the bb between lock/unlock plus the remaining instruction in lock and unlock block
-						lkBlkInstNum := len(mapLockToBB[l].Instrs)
-						lkBlkRemainInst := checkInstructionBetween(mapLockToBB[l], setLockIndex[l], lkBlkInstNum)
-						ulkBlkRemainInst := checkInstructionBetween(mapUnlockToBB[ul], -1, setUnlockIndex[ul])
-						bbInBetween := basicBlockInBetween(mapLockToBB[l], mapUnlockToBB[ul])
-						if lkBlkRemainInst && ulkBlkRemainInst && checkBasicBlockInCriticalSection(bbInBetween) {
-							lockUnlockPairDifferentBB++
-							setUnlock[ul] = false
-							setLock[l] = false
-							addLockPairToLockInfo(lockMap, lRcv, l, ul, ssaF)
-						} else {
-							unsafeLock++
-						}
-					}
-				}
-			}
-		}
-
-		// lock and defer unlock in different bb, but dominates and post-dominate each other
-		for ul := range setDeferUnlock {
-			// ulRcv := ul.Args[0].String()
-			for l := range setLock {
-				lRcv := l.Args[0].String()
-				lockBB, ok := mapLockToBB[l]
-				if ok == false {
-					break
-				}
-				unlockBB, ok := mapUnlockToBB[ul]
-				if ok == false {
-					break
-				}
-				if isSameLock(l.Args[0], ul.Args[0]) && lockBB.Dominates(unlockBB) {
-					paired++
-					lkPD := postDomMap[mapLockToBB[l].Index]
-					if domContains(lkPD, mapDeferUnlockToBB[ul].Index) {
-						// critical section is all block that can be reached by defer unlock and everything in between the lock and unlock
-						lkBlkInstNum := len(mapLockToBB[l].Instrs)
-						ulkBlkInstNumber := len(mapDeferUnlockToBB[ul].Instrs)
-						lkBlkRemainInst := checkInstructionBetween(mapLockToBB[l], setLockIndex[l], lkBlkInstNum)
-						ulkBlkRemainInst := checkInstructionBetween(mapDeferUnlockToBB[ul], -1, setDeferUnlockIndex[ul]) && checkInstructionBetween(mapDeferUnlockToBB[ul], setDeferUnlockIndex[ul], ulkBlkInstNumber)
-						bbInBetween := basicBlockInBetween(mapLockToBB[l], mapUnlockToBB[ul])
-						bbReachable := reachableBlks(mapDeferUnlockToBB[ul])
-						if lkBlkRemainInst && ulkBlkRemainInst && checkBasicBlockInCriticalSection(bbReachable) && checkBasicBlockInCriticalSection(bbInBetween) {
-							lockDeferUnlockPairDifferentBB++
-							setDeferUnlock[ul] = false
-							setLock[l] = false
-							addLockPairToLockInfo(lockMap, lRcv, l, ul, ssaF)
-						} else {
-							unsafeLock++
-						}
-					}
-				} else if isSameLock(l.Args[0], ul.Args[0]) && unlockBB.Dominates(lockBB) {
-					paired++
-					// add this since defer unlock can happen before lock
-					ulkPD := postDomMap[mapLockToBB[ul].Index]
-					if domContains(ulkPD, mapDeferUnlockToBB[l].Index) {
-						// critical section is all block that can be reached by defer unlock and everything in between the lock and unlock
-						lkBlkInstNum := len(mapLockToBB[l].Instrs)
-						lkBlkRemainInst := checkInstructionBetween(mapLockToBB[l], setLockIndex[l], lkBlkInstNum)
-						bbReachable := reachableBlks(mapLockToBB[l])
-						if lkBlkRemainInst && checkBasicBlockInCriticalSection(bbReachable) {
-							lockDeferUnlockPairDifferentBB++
-							setDeferUnlock[ul] = false
-							setLock[l] = false
-							addLockPairToLockInfo(lockMap, lRcv, l, ul, ssaF)
-						} else {
-							unsafeLock++
-						}
-					}
-				}
-			}
-		}
-	}
-
-	for _, v := range setLock {
-		if v == true {
-			unpaired++
-		}
-	}
-	for _, v := range setUnlock {
-		if v == true {
-			unpaired++
-		}
-	}
-	for _, v := range setDeferUnlock {
-		if v == true {
-			unpaired++
-		}
-	}
-	numLock += len(setLock)
-	numUnlock += len(setUnlock)
-	numDeferUnlock += len(setDeferUnlock)
-
-	return lockMap
 }
 
 func pathContains(replacePath [][]ast.Node, curPos token.Pos) bool {
@@ -743,397 +407,399 @@ func collectBlkstmt(f ast.Node, pkg *packages.Package) {
 // foo := Foo{}
 // foo.Lock()
 // 4. Promoted field pointer
-func rewriteAST(f ast.Node, pkg *packages.Package, replacePathRWMutex, insertPathRWMutex, replacePathMutex, insertPathMutex, lambdaPath, normalPath *[][]ast.Node, posToID map[token.Pos]string) ast.Node {
-	fmt.Println("  Rewriting field accesses in the file...")
-	blkmap := make(map[*ast.BlockStmt]bool)
-	addImport := false
-	optilockNumber := len(posToID) / 2
-	postFunc := func(c *astutil.Cursor) bool {
-		node := c.Node()
-		switch n := node.(type) {
-		case *ast.CallExpr:
-			{
-				// when the lock is a *sync.Mutex
-				switch {
-				case pathContains(*replacePathMutex, n.Pos()):
-					{
-						if se, ok := n.Fun.(*ast.SelectorExpr); ok {
-							if se.Sel.Name == "Lock" || se.Sel.Name == "Unlock" {
-								lockType := typesMap[se.X].Type.String()
-								// branch 1: receiver is lock pointer
-								if strings.Contains(lockType, "*sync.Mutex") {
-									fun := &ast.SelectorExpr{
-										X: &ast.Ident{
-											Name:    majicLockName + getPosName(*replacePathMutex, n.Pos(), posToID),
-											NamePos: se.X.Pos(),
-										},
-										Sel: se.Sel,
-									}
-									call := &ast.CallExpr{
-										Fun:      fun,
-										Lparen:   token.NoPos,
-										Args:     []ast.Expr{se.X},
-										Ellipsis: token.NoPos,
-										Rparen:   token.NoPos,
-									}
-
-									c.Replace(call)
-								} else {
-									// branch 4: receiver is promoted field pointer
-									fun := &ast.SelectorExpr{
-										X: &ast.Ident{
-											Name:    majicLockName + getPosName(*replacePathMutex, n.Pos(), posToID),
-											NamePos: se.X.Pos(),
-										},
-										Sel: se.Sel,
-									}
-									newSel := &ast.SelectorExpr{
-										X:   se.X,
-										Sel: ast.NewIdent("Mutex"),
-									}
-									call := &ast.CallExpr{
-										Fun:      fun,
-										Lparen:   token.NoPos,
-										Args:     []ast.Expr{newSel},
-										Ellipsis: token.NoPos,
-										Rparen:   token.NoPos,
-									}
-
-									c.Replace(call)
-								}
-							}
-						}
-					}
-				case pathContains(*insertPathMutex, n.Pos()):
-					{
-						// when the lock is a sync.Mutex
-						if se, ok := n.Fun.(*ast.SelectorExpr); ok {
-							if se.Sel.Name == "Lock" || se.Sel.Name == "Unlock" {
-								lockType := typesMap[se.X].Type.String()
-								if lockType == "sync.Mutex" {
-									// branch 2: receiver is lock object, need to take its address
-									fun := &ast.SelectorExpr{
-										X: &ast.Ident{
-											Name:    majicLockName + getPosName(*insertPathMutex, n.Pos(), posToID),
-											NamePos: se.X.Pos(),
-										},
-										Sel: se.Sel,
-									}
-									newX := &ast.UnaryExpr{
-										Op: token.AND,
-										X:  se.X,
-									}
-									call := &ast.CallExpr{
-										Fun:      fun,
-										Lparen:   token.NoPos,
-										Args:     []ast.Expr{newX},
-										Ellipsis: token.NoPos,
-										Rparen:   token.NoPos,
-									}
-
-									c.Replace(call)
-								} else {
-									// branch 3: receiver is some promoted field object
-									fun := &ast.SelectorExpr{
-										X: &ast.Ident{
-											Name:    majicLockName + getPosName(*insertPathMutex, n.Pos(), posToID),
-											NamePos: se.X.Pos(),
-										},
-										Sel: se.Sel,
-									}
-									newSel := &ast.SelectorExpr{
-										X:   se.X,
-										Sel: ast.NewIdent("Mutex"),
-									}
-									newX := &ast.UnaryExpr{
-										Op: token.AND,
-										X:  newSel,
-									}
-									call := &ast.CallExpr{
-										Fun:      fun,
-										Lparen:   token.NoPos,
-										Args:     []ast.Expr{newX},
-										Ellipsis: token.NoPos,
-										Rparen:   token.NoPos,
-									}
-
-									c.Replace(call)
-								}
-							}
-						}
-					}
-				case pathContains(*replacePathRWMutex, n.Pos()):
-					{
-						// when the lock is *sync.RWMutex
-						if se, ok := n.Fun.(*ast.SelectorExpr); ok {
-							// change RWMutex.Lock()/Unlock() to majicLock.WLock()/WUnlock()
-							if se.Sel.Name == "Lock" || se.Sel.Name == "Unlock" {
-								lockType := typesMap[se.X].Type.String()
-								// branch 1: receiver is a lock pointer
-								if lockType == "*sync.RWMutex" {
-									fun := &ast.SelectorExpr{
-										X: &ast.Ident{
-											Name:    majicLockName + getPosName(*replacePathRWMutex, n.Pos(), posToID),
-											NamePos: se.X.Pos(),
-										},
-										Sel: &ast.Ident{
-											Name:    "W" + se.Sel.Name,
-											NamePos: se.Sel.NamePos,
-										},
-									}
-
-									call := &ast.CallExpr{
-										Fun:      fun,
-										Lparen:   token.NoPos,
-										Args:     []ast.Expr{se.X},
-										Ellipsis: token.NoPos,
-										Rparen:   token.NoPos,
-									}
-
-									c.Replace(call)
-								} else {
-									// branch 3: promoted field pointer
-									fun := &ast.SelectorExpr{
-										X: &ast.Ident{
-											Name:    majicLockName + getPosName(*replacePathRWMutex, n.Pos(), posToID),
-											NamePos: se.X.Pos(),
-										},
-										Sel: &ast.Ident{
-											Name:    "W" + se.Sel.Name,
-											NamePos: se.Sel.NamePos,
-										},
-									}
-									newX := &ast.SelectorExpr{
-										X:   se.X,
-										Sel: ast.NewIdent("RWMutex"),
-									}
-									call := &ast.CallExpr{
-										Fun:      fun,
-										Lparen:   token.NoPos,
-										Args:     []ast.Expr{newX},
-										Ellipsis: token.NoPos,
-										Rparen:   token.NoPos,
-									}
-
-									c.Replace(call)
-								}
-							} else if se.Sel.Name == "RLock" || se.Sel.Name == "RUnlock" {
-								// this changes RLock/RUnlock of RWMutex
-								lockType := typesMap[se.X].Type.String()
-
-								if lockType == "*sync.RWMutex" {
+func rewriteAST(f ast.Node, pkg *packages.Package, points map[ast.Node]*luPoint) ast.Node {
+	/*
+		fmt.Println("  Rewriting field accesses in the file...")
+		blkmap := make(map[*ast.BlockStmt]bool)
+		addImport := false
+		optilockNumber := len(posToID) / 2
+		postFunc := func(c *astutil.Cursor) bool {
+			node := c.Node()
+			switch n := node.(type) {
+			case *ast.CallExpr:
+				{
+					// when the lock is a *sync.Mutex
+					switch {
+					case pathContains(*replacePathMutex, n.Pos()):
+						{
+							if se, ok := n.Fun.(*ast.SelectorExpr); ok {
+								if se.Sel.Name == "Lock" || se.Sel.Name == "Unlock" {
+									lockType := typesMap[se.X].Type.String()
 									// branch 1: receiver is lock pointer
-									fun := &ast.SelectorExpr{
-										X: &ast.Ident{
-											Name:    majicLockName + getPosName(*replacePathRWMutex, n.Pos(), posToID),
-											NamePos: se.X.Pos(),
-										},
-										Sel: &ast.Ident{
-											Name:    se.Sel.Name,
-											NamePos: se.Sel.NamePos,
-										},
-									}
+									if strings.Contains(lockType, "*sync.Mutex") {
+										fun := &ast.SelectorExpr{
+											X: &ast.Ident{
+												Name:    majicLockName + getPosName(*replacePathMutex, n.Pos(), posToID),
+												NamePos: se.X.Pos(),
+											},
+											Sel: se.Sel,
+										}
+										call := &ast.CallExpr{
+											Fun:      fun,
+											Lparen:   token.NoPos,
+											Args:     []ast.Expr{se.X},
+											Ellipsis: token.NoPos,
+											Rparen:   token.NoPos,
+										}
 
-									call := &ast.CallExpr{
-										Fun:      fun,
-										Lparen:   token.NoPos,
-										Args:     []ast.Expr{se.X},
-										Ellipsis: token.NoPos,
-										Rparen:   token.NoPos,
-									}
+										c.Replace(call)
+									} else {
+										// branch 4: receiver is promoted field pointer
+										fun := &ast.SelectorExpr{
+											X: &ast.Ident{
+												Name:    majicLockName + getPosName(*replacePathMutex, n.Pos(), posToID),
+												NamePos: se.X.Pos(),
+											},
+											Sel: se.Sel,
+										}
+										newSel := &ast.SelectorExpr{
+											X:   se.X,
+											Sel: ast.NewIdent("Mutex"),
+										}
+										call := &ast.CallExpr{
+											Fun:      fun,
+											Lparen:   token.NoPos,
+											Args:     []ast.Expr{newSel},
+											Ellipsis: token.NoPos,
+											Rparen:   token.NoPos,
+										}
 
-									c.Replace(call)
-								} else {
-									// branch 4: lock is called on promoted field pointer
-									fun := &ast.SelectorExpr{
-										X: &ast.Ident{
-											Name:    majicLockName + getPosName(*replacePathRWMutex, n.Pos(), posToID),
-											NamePos: se.X.Pos(),
-										},
-										Sel: se.Sel,
+										c.Replace(call)
 									}
-									newX := &ast.SelectorExpr{
-										X:   se.X,
-										Sel: ast.NewIdent("RWMutex"),
-									}
-									call := &ast.CallExpr{
-										Fun:      fun,
-										Lparen:   token.NoPos,
-										Args:     []ast.Expr{newX},
-										Ellipsis: token.NoPos,
-										Rparen:   token.NoPos,
-									}
-
-									c.Replace(call)
 								}
 							}
 						}
+					case pathContains(*insertPathMutex, n.Pos()):
+						{
+							// when the lock is a sync.Mutex
+							if se, ok := n.Fun.(*ast.SelectorExpr); ok {
+								if se.Sel.Name == "Lock" || se.Sel.Name == "Unlock" {
+									lockType := typesMap[se.X].Type.String()
+									if lockType == "sync.Mutex" {
+										// branch 2: receiver is lock object, need to take its address
+										fun := &ast.SelectorExpr{
+											X: &ast.Ident{
+												Name:    majicLockName + getPosName(*insertPathMutex, n.Pos(), posToID),
+												NamePos: se.X.Pos(),
+											},
+											Sel: se.Sel,
+										}
+										newX := &ast.UnaryExpr{
+											Op: token.AND,
+											X:  se.X,
+										}
+										call := &ast.CallExpr{
+											Fun:      fun,
+											Lparen:   token.NoPos,
+											Args:     []ast.Expr{newX},
+											Ellipsis: token.NoPos,
+											Rparen:   token.NoPos,
+										}
 
-					}
-				case pathContains(*insertPathRWMutex, n.Pos()):
-					{
-						// when the lock is sync.RWMutex
-						if se, ok := n.Fun.(*ast.SelectorExpr); ok {
-							// change RWMutex.Lock()/Unlock() to majicLock.WLock()/WUnlock()
-							if se.Sel.Name == "Lock" || se.Sel.Name == "Unlock" {
-								lockType := typesMap[se.X].Type.String()
-								if lockType == "sync.RWMutex" {
-									// branch 2: receiver is a lock value
-									fun := &ast.SelectorExpr{
-										X: &ast.Ident{
-											Name:    majicLockName + getPosName(*insertPathRWMutex, n.Pos(), posToID),
-											NamePos: se.X.Pos(),
-										},
-										Sel: &ast.Ident{
-											Name:    "W" + se.Sel.Name,
-											NamePos: se.Sel.NamePos,
-										},
-									}
-									newX := &ast.UnaryExpr{
-										Op: token.AND,
-										X:  se.X,
-									}
-									call := &ast.CallExpr{
-										Fun:      fun,
-										Lparen:   token.NoPos,
-										Args:     []ast.Expr{newX},
-										Ellipsis: token.NoPos,
-										Rparen:   token.NoPos,
-									}
+										c.Replace(call)
+									} else {
+										// branch 3: receiver is some promoted field object
+										fun := &ast.SelectorExpr{
+											X: &ast.Ident{
+												Name:    majicLockName + getPosName(*insertPathMutex, n.Pos(), posToID),
+												NamePos: se.X.Pos(),
+											},
+											Sel: se.Sel,
+										}
+										newSel := &ast.SelectorExpr{
+											X:   se.X,
+											Sel: ast.NewIdent("Mutex"),
+										}
+										newX := &ast.UnaryExpr{
+											Op: token.AND,
+											X:  newSel,
+										}
+										call := &ast.CallExpr{
+											Fun:      fun,
+											Lparen:   token.NoPos,
+											Args:     []ast.Expr{newX},
+											Ellipsis: token.NoPos,
+											Rparen:   token.NoPos,
+										}
 
-									c.Replace(call)
-								} else {
-									// branch 3: promoted field object
-									fun := &ast.SelectorExpr{
-										X: &ast.Ident{
-											Name:    majicLockName + getPosName(*insertPathRWMutex, n.Pos(), posToID),
-											NamePos: se.X.Pos(),
-										},
-										Sel: &ast.Ident{
-											Name:    "W" + se.Sel.Name,
-											NamePos: se.Sel.NamePos,
-										},
+										c.Replace(call)
 									}
-									newSel := &ast.SelectorExpr{
-										X:   se.X,
-										Sel: ast.NewIdent("RWMutex"),
-									}
-									newX := &ast.UnaryExpr{
-										Op: token.AND,
-										X:  newSel,
-									}
-									call := &ast.CallExpr{
-										Fun:      fun,
-										Lparen:   token.NoPos,
-										Args:     []ast.Expr{newX},
-										Ellipsis: token.NoPos,
-										Rparen:   token.NoPos,
-									}
-
-									c.Replace(call)
 								}
-							} else if se.Sel.Name == "RLock" || se.Sel.Name == "RUnlock" {
-								// this changes RLock/RUnlock of RWMutex
-								lockType := typesMap[se.X].Type.String()
-								if lockType == "sync.RWMutex" {
-									// branch 2, lock is called on lock value
-									fun := &ast.SelectorExpr{
-										X: &ast.Ident{
-											Name:    majicLockName + getPosName(*insertPathRWMutex, n.Pos(), posToID),
-											NamePos: se.X.Pos(),
-										},
-										Sel: se.Sel,
-									}
-									newX := &ast.UnaryExpr{
-										Op: token.AND,
-										X:  se.X,
-									}
-									call := &ast.CallExpr{
-										Fun:      fun,
-										Lparen:   token.NoPos,
-										Args:     []ast.Expr{newX},
-										Ellipsis: token.NoPos,
-										Rparen:   token.NoPos,
-									}
+							}
+						}
+					case pathContains(*replacePathRWMutex, n.Pos()):
+						{
+							// when the lock is *sync.RWMutex
+							if se, ok := n.Fun.(*ast.SelectorExpr); ok {
+								// change RWMutex.Lock()/Unlock() to majicLock.WLock()/WUnlock()
+								if se.Sel.Name == "Lock" || se.Sel.Name == "Unlock" {
+									lockType := typesMap[se.X].Type.String()
+									// branch 1: receiver is a lock pointer
+									if lockType == "*sync.RWMutex" {
+										fun := &ast.SelectorExpr{
+											X: &ast.Ident{
+												Name:    majicLockName + getPosName(*replacePathRWMutex, n.Pos(), posToID),
+												NamePos: se.X.Pos(),
+											},
+											Sel: &ast.Ident{
+												Name:    "W" + se.Sel.Name,
+												NamePos: se.Sel.NamePos,
+											},
+										}
 
-									c.Replace(call)
-								} else {
-									// branch 3: lock is called on promoted field value
-									fun := &ast.SelectorExpr{
-										X: &ast.Ident{
-											Name:    majicLockName + getPosName(*insertPathRWMutex, n.Pos(), posToID),
-											NamePos: se.X.Pos(),
-										},
-										Sel: se.Sel,
-									}
-									newSel := &ast.SelectorExpr{
-										X:   se.X,
-										Sel: ast.NewIdent("RWMutex"),
-									}
-									newX := &ast.UnaryExpr{
-										Op: token.AND,
-										X:  newSel,
-									}
-									call := &ast.CallExpr{
-										Fun:      fun,
-										Lparen:   token.NoPos,
-										Args:     []ast.Expr{newX},
-										Ellipsis: token.NoPos,
-										Rparen:   token.NoPos,
-									}
+										call := &ast.CallExpr{
+											Fun:      fun,
+											Lparen:   token.NoPos,
+											Args:     []ast.Expr{se.X},
+											Ellipsis: token.NoPos,
+											Rparen:   token.NoPos,
+										}
 
-									c.Replace(call)
+										c.Replace(call)
+									} else {
+										// branch 3: promoted field pointer
+										fun := &ast.SelectorExpr{
+											X: &ast.Ident{
+												Name:    majicLockName + getPosName(*replacePathRWMutex, n.Pos(), posToID),
+												NamePos: se.X.Pos(),
+											},
+											Sel: &ast.Ident{
+												Name:    "W" + se.Sel.Name,
+												NamePos: se.Sel.NamePos,
+											},
+										}
+										newX := &ast.SelectorExpr{
+											X:   se.X,
+											Sel: ast.NewIdent("RWMutex"),
+										}
+										call := &ast.CallExpr{
+											Fun:      fun,
+											Lparen:   token.NoPos,
+											Args:     []ast.Expr{newX},
+											Ellipsis: token.NoPos,
+											Rparen:   token.NoPos,
+										}
+
+										c.Replace(call)
+									}
+								} else if se.Sel.Name == "RLock" || se.Sel.Name == "RUnlock" {
+									// this changes RLock/RUnlock of RWMutex
+									lockType := typesMap[se.X].Type.String()
+
+									if lockType == "*sync.RWMutex" {
+										// branch 1: receiver is lock pointer
+										fun := &ast.SelectorExpr{
+											X: &ast.Ident{
+												Name:    majicLockName + getPosName(*replacePathRWMutex, n.Pos(), posToID),
+												NamePos: se.X.Pos(),
+											},
+											Sel: &ast.Ident{
+												Name:    se.Sel.Name,
+												NamePos: se.Sel.NamePos,
+											},
+										}
+
+										call := &ast.CallExpr{
+											Fun:      fun,
+											Lparen:   token.NoPos,
+											Args:     []ast.Expr{se.X},
+											Ellipsis: token.NoPos,
+											Rparen:   token.NoPos,
+										}
+
+										c.Replace(call)
+									} else {
+										// branch 4: lock is called on promoted field pointer
+										fun := &ast.SelectorExpr{
+											X: &ast.Ident{
+												Name:    majicLockName + getPosName(*replacePathRWMutex, n.Pos(), posToID),
+												NamePos: se.X.Pos(),
+											},
+											Sel: se.Sel,
+										}
+										newX := &ast.SelectorExpr{
+											X:   se.X,
+											Sel: ast.NewIdent("RWMutex"),
+										}
+										call := &ast.CallExpr{
+											Fun:      fun,
+											Lparen:   token.NoPos,
+											Args:     []ast.Expr{newX},
+											Ellipsis: token.NoPos,
+											Rparen:   token.NoPos,
+										}
+
+										c.Replace(call)
+									}
+								}
+							}
+
+						}
+					case pathContains(*insertPathRWMutex, n.Pos()):
+						{
+							// when the lock is sync.RWMutex
+							if se, ok := n.Fun.(*ast.SelectorExpr); ok {
+								// change RWMutex.Lock()/Unlock() to majicLock.WLock()/WUnlock()
+								if se.Sel.Name == "Lock" || se.Sel.Name == "Unlock" {
+									lockType := typesMap[se.X].Type.String()
+									if lockType == "sync.RWMutex" {
+										// branch 2: receiver is a lock value
+										fun := &ast.SelectorExpr{
+											X: &ast.Ident{
+												Name:    majicLockName + getPosName(*insertPathRWMutex, n.Pos(), posToID),
+												NamePos: se.X.Pos(),
+											},
+											Sel: &ast.Ident{
+												Name:    "W" + se.Sel.Name,
+												NamePos: se.Sel.NamePos,
+											},
+										}
+										newX := &ast.UnaryExpr{
+											Op: token.AND,
+											X:  se.X,
+										}
+										call := &ast.CallExpr{
+											Fun:      fun,
+											Lparen:   token.NoPos,
+											Args:     []ast.Expr{newX},
+											Ellipsis: token.NoPos,
+											Rparen:   token.NoPos,
+										}
+
+										c.Replace(call)
+									} else {
+										// branch 3: promoted field object
+										fun := &ast.SelectorExpr{
+											X: &ast.Ident{
+												Name:    majicLockName + getPosName(*insertPathRWMutex, n.Pos(), posToID),
+												NamePos: se.X.Pos(),
+											},
+											Sel: &ast.Ident{
+												Name:    "W" + se.Sel.Name,
+												NamePos: se.Sel.NamePos,
+											},
+										}
+										newSel := &ast.SelectorExpr{
+											X:   se.X,
+											Sel: ast.NewIdent("RWMutex"),
+										}
+										newX := &ast.UnaryExpr{
+											Op: token.AND,
+											X:  newSel,
+										}
+										call := &ast.CallExpr{
+											Fun:      fun,
+											Lparen:   token.NoPos,
+											Args:     []ast.Expr{newX},
+											Ellipsis: token.NoPos,
+											Rparen:   token.NoPos,
+										}
+
+										c.Replace(call)
+									}
+								} else if se.Sel.Name == "RLock" || se.Sel.Name == "RUnlock" {
+									// this changes RLock/RUnlock of RWMutex
+									lockType := typesMap[se.X].Type.String()
+									if lockType == "sync.RWMutex" {
+										// branch 2, lock is called on lock value
+										fun := &ast.SelectorExpr{
+											X: &ast.Ident{
+												Name:    majicLockName + getPosName(*insertPathRWMutex, n.Pos(), posToID),
+												NamePos: se.X.Pos(),
+											},
+											Sel: se.Sel,
+										}
+										newX := &ast.UnaryExpr{
+											Op: token.AND,
+											X:  se.X,
+										}
+										call := &ast.CallExpr{
+											Fun:      fun,
+											Lparen:   token.NoPos,
+											Args:     []ast.Expr{newX},
+											Ellipsis: token.NoPos,
+											Rparen:   token.NoPos,
+										}
+
+										c.Replace(call)
+									} else {
+										// branch 3: lock is called on promoted field value
+										fun := &ast.SelectorExpr{
+											X: &ast.Ident{
+												Name:    majicLockName + getPosName(*insertPathRWMutex, n.Pos(), posToID),
+												NamePos: se.X.Pos(),
+											},
+											Sel: se.Sel,
+										}
+										newSel := &ast.SelectorExpr{
+											X:   se.X,
+											Sel: ast.NewIdent("RWMutex"),
+										}
+										newX := &ast.UnaryExpr{
+											Op: token.AND,
+											X:  newSel,
+										}
+										call := &ast.CallExpr{
+											Fun:      fun,
+											Lparen:   token.NoPos,
+											Args:     []ast.Expr{newX},
+											Ellipsis: token.NoPos,
+											Rparen:   token.NoPos,
+										}
+
+										c.Replace(call)
+									}
 								}
 							}
 						}
 					}
 				}
-			}
-		case *ast.ImportSpec:
-			{
-				if addImport == false {
-					newImport := &ast.ImportSpec{
-						Doc:  n.Doc,
-						Name: ast.NewIdent("rtm"),
-						Path: &ast.BasicLit{
-							ValuePos: n.Path.ValuePos,
-							Kind:     n.Path.Kind,
-							Value:    strconv.Quote("github.com/lollllcat/GOCC/tools/gocc/rtmlib"),
-						},
-						Comment: n.Comment,
-						EndPos:  n.EndPos,
-					}
-					c.InsertAfter(newImport)
-					addImport = true
-				}
-			}
-		case *ast.BlockStmt:
-			{
-				// purpose of this part is to add the majicLock declarations to the funtions that we transform
-				blkStmt := c.Node().(*ast.BlockStmt)
-				// not added before
-				if _, ok := blkmap[blkStmt]; !ok {
-					if fd, ok := c.Parent().(*ast.FuncDecl); ok && c.Name() == "Body" {
-						// containLocks := pathContains(*replacePathMutex, n.Pos()) || pathContains(*replacePathRWMutex, n.Pos()) || pathContains(*insertPathRWMutex, n.Pos()) || pathContains(*insertPathMutex, n.Pos())
-						containLocks := pathContains(*normalPath, n.Pos())
-						if containLocks {
-							addContextInitStmt(&(fd.Body.List), fd.Name.NamePos, optilockNumber)
-							blkmap[blkStmt] = true
+			case *ast.ImportSpec:
+				{
+					if addImport == false {
+						newImport := &ast.ImportSpec{
+							Doc:  n.Doc,
+							Name: ast.NewIdent("rtm"),
+							Path: &ast.BasicLit{
+								ValuePos: n.Path.ValuePos,
+								Kind:     n.Path.Kind,
+								Value:    strconv.Quote("github.com/lollllcat/GOCC/tools/gocc/rtmlib"),
+							},
+							Comment: n.Comment,
+							EndPos:  n.EndPos,
 						}
-					} else if fl, ok := c.Parent().(*ast.FuncLit); ok && c.Name() == "Body" {
-						// containLocks := pathContains(*replacePathMutex, n.Pos()) || pathContains(*replacePathRWMutex, n.Pos()) || pathContains(*insertPathRWMutex, n.Pos()) || pathContains(*insertPathMutex, n.Pos())
-						containLocks := reversePathContains(*lambdaPath, c.Node().Pos())
-						if containLocks {
-							addContextInitStmt(&(fl.Body.List), fl.Body.Lbrace, optilockNumber)
-							blkmap[blkStmt] = true
-						}
+						c.InsertAfter(newImport)
+						addImport = true
 					}
 				}
+			case *ast.BlockStmt:
+				{
+					// purpose of this part is to add the majicLock declarations to the funtions that we transform
+					blkStmt := c.Node().(*ast.BlockStmt)
+					// not added before
+					if _, ok := blkmap[blkStmt]; !ok {
+						if fd, ok := c.Parent().(*ast.FuncDecl); ok && c.Name() == "Body" {
+							// containLocks := pathContains(*replacePathMutex, n.Pos()) || pathContains(*replacePathRWMutex, n.Pos()) || pathContains(*insertPathRWMutex, n.Pos()) || pathContains(*insertPathMutex, n.Pos())
+							containLocks := pathContains(*normalPath, n.Pos())
+							if containLocks {
+								addContextInitStmt(&(fd.Body.List), fd.Name.NamePos, optilockNumber)
+								blkmap[blkStmt] = true
+							}
+						} else if fl, ok := c.Parent().(*ast.FuncLit); ok && c.Name() == "Body" {
+							// containLocks := pathContains(*replacePathMutex, n.Pos()) || pathContains(*replacePathRWMutex, n.Pos()) || pathContains(*insertPathRWMutex, n.Pos()) || pathContains(*insertPathMutex, n.Pos())
+							containLocks := reversePathContains(*lambdaPath, c.Node().Pos())
+							if containLocks {
+								addContextInitStmt(&(fl.Body.List), fl.Body.Lbrace, optilockNumber)
+								blkmap[blkStmt] = true
+							}
+						}
+					}
+				}
 			}
+			return true
 		}
-		return true
-	}
-	return astutil.Apply(f, nil, postFunc)
+		return astutil.Apply(f, nil, postFunc)
+	*/return nil
 }
 
 func writeAST(f ast.Node, sourceFilePath string, pkg *packages.Package, filename string) {
@@ -1231,29 +897,35 @@ func checkSameLock(l lockInfo, pkgs []*packages.Package) bool {
 	return true
 }
 
+func initProfile(profilePath string) {
+	profileProvided = true
+	f, err := os.Open(profilePath)
+	defer f.Close()
+	if err != nil {
+		panic("cannot open profile")
+	}
+	rd := bufio.NewReader(f)
+	for {
+		line, err := rd.ReadString('\n')
+		if err == io.EOF {
+			fmt.Print(line)
+			break
+		}
+		if err != nil {
+			panic("profile is wrong")
+		}
+		hotFuncMap[strings.TrimSpace(line)] = emptyStruct
+	}
+}
+
 func main() {
-
-	// lockName contains lock type and lock/unlock operation name
-	lockName := [3][3]string{
-		{"*sync.Mutex", "Lock", "Unlock"},
-		{"*sync.RWMutex", "Lock", "Unlock"},
-		{"*sync.RWMutex", "RLock", "RUnlock"}}
-
-	// blockList is the collection of package names that violates HTM
-	blockList = initBlockList()
-
 	// indicates a function is safe to use HTM or not. Local check only.
 	mapFuncSafety = make(map[*ssa.Function]bool)
-
-	// this map stores the hot function from the profiling
-	hotFuncMap = make(map[string]bool)
-
 	lockInLambdaFunc = make(map[token.Pos]bool)
 	blkstmtMap = make(map[token.Pos]bool)
 
 	mPkg = make(map[string]int)
 	pkgName = make(map[string]bool)
-	tokenToName = make(map[token.Pos]string)
 	pathToEndNodePos = make(map[ast.Node]token.Pos)
 
 	// lock positions to rewrite
@@ -1267,7 +939,7 @@ func main() {
 	statsPtr := flag.Bool("stats", false, "dump out the stats information of the locks")
 
 	var inputFile string
-	flag.StringVar(&inputFile, "input", "", "source file to analyze")
+	flag.StringVar(&inputFile, "input", "testdata/test24.go", "source file to analyze")
 
 	var profilePath string
 	flag.StringVar(&profilePath, "profile", "", "profiling of hot function")
@@ -1285,24 +957,7 @@ func main() {
 	}
 
 	if profilePath != "" {
-		profileProvided = true
-		f, err := os.Open(profilePath)
-		defer f.Close()
-		if err != nil {
-			panic("cannot open profile")
-		}
-		rd := bufio.NewReader(f)
-		for {
-			line, err := rd.ReadString('\n')
-			if err == io.EOF {
-				fmt.Print(line)
-				break
-			}
-			if err != nil {
-				panic("profile is wrong")
-			}
-			hotFuncMap[strings.TrimSpace(line)] = true
-		}
+		initProfile(profilePath)
 	}
 
 	outputPath = inputFile + "/"
@@ -1341,119 +996,64 @@ func main() {
 
 	// TODO: first pass on optimized form and second pass on naive form to check if it is a value or object
 
-	for _, lockCombo := range lockName {
-		lockType := lockCombo[0]
-		lockFuncName := lockCombo[1]
-		unlockFuncName := lockCombo[2]
-		allLockVals = make(map[ssa.Value]bool)
-		allUnlockVals = make(map[ssa.Value]bool)
+	funcSummaryMap := map[*ssa.Function]*functionSummary{}
+	globalLUPoints := map[*luPoint]ssa.Instruction{}
 
-		for node := range mCallGraph.Nodes {
-			if countLockNumber(node, lockType, lockFuncName, unlockFuncName) == true {
-				mapFuncSafety[node] = true
-			} else {
-				mapFuncSafety[node] = false
-			}
+	for node := range mCallGraph.Nodes {
+		m, r, w, ptToIns, insToPt := collectLUPoints(node)
+		funcSummaryMap[node] = &functionSummary{
+			f:       node,
+			ptToIns: ptToIns,
+			insToPt: insToPt,
+			m:       m,
+			r:       r,
+			w:       w,
 		}
+		for k, v := range ptToIns {
+			globalLUPoints[k] = v
+		}
+		//We'll compute the remaining summary after alias analysis
+	}
 
-		// aliasing analysis on lock
-		lockAliasMap = postDom.MatchLockWithUnlock(ssapkgs, allLockVals, allUnlockVals, isSingleFile, *syntheticPtr)
+	// Do alias analysis
+	collectPointsToSet(ssapkgs, globalLUPoints, isSingleFile, *syntheticPtr)
 
-		for node := range mCallGraph.Nodes {
-			// reset basic block safety map for each function
-			mBBSafety = make(map[int]bool)
-			curNode = node
-			postDom.GetExit(node)
-			lockInfoMap := lockAnalysis(node, lockType, lockFuncName, unlockFuncName)
-			isLambda := strings.Contains(node.RelString(node.Pkg.Pkg), "$")
-			for lkName, value := range lockInfoMap {
-				// if this is not a same lock, don't replace.
-				// TODO: fix this
-				if checkSameLock(value, pkgs) == false {
-					continue
-				}
-				// we need to differentiate Mutex and RWMutex
-				// this is a RWMute
-				if lockType == "*sync.RWMutex" {
-					if value.isValue == false {
-						// a RWMutex pointer not a value
-						for _, item := range value.lockPosition {
-							replacedRWMutexPtr[item] = true
-							tokenToName[item] = lkName
-							if isLambda {
-								lockInLambdaFunc[item] = true
-							}
-						}
-						for _, item := range value.unlockPosition {
-							replacedRWMutexPtr[item] = true
-							tokenToName[item] = lkName
-							if isLambda {
-								lockInLambdaFunc[item] = true
-							}
-						}
-					} else {
-						// a RWMutex value
-						for _, item := range value.lockPosition {
-							replacedRWMutexVal[item] = true
-							tokenToName[item] = lkName
-							if isLambda {
-								lockInLambdaFunc[item] = true
-							}
-						}
-						for _, item := range value.unlockPosition {
-							replacedRWMutexVal[item] = true
-							tokenToName[item] = lkName
-							if isLambda {
-								lockInLambdaFunc[item] = true
-							}
-						}
-					}
-				} else {
-					if value.isValue == false {
-						// a Mutex pointer not a value
-						for _, item := range value.lockPosition {
-							replacedMutexPtr[item] = true
-							tokenToName[item] = lkName
-							if isLambda {
-								lockInLambdaFunc[item] = true
-							}
-						}
-						for _, item := range value.unlockPosition {
-							replacedMutexPtr[item] = true
-							tokenToName[item] = lkName
-							if isLambda {
-								lockInLambdaFunc[item] = true
-							}
-						}
-					} else {
-						// a Mutex value
-						for _, item := range value.lockPosition {
-							replacedMutexVal[item] = true
-							tokenToName[item] = lkName
-							if isLambda {
-								lockInLambdaFunc[item] = true
-							}
-						}
-						for _, item := range value.unlockPosition {
-							replacedMutexVal[item] = true
-							tokenToName[item] = lkName
-							if isLambda {
-								lockInLambdaFunc[item] = true
-							}
-						}
-					}
-				}
-			}
+	// Greedily compute function summaries (can be done on need basis also)
+	for f, n := range mCallGraph.Nodes {
+		funcSummaryMap[f].compute(n)
+	}
+
+	// Set isLambda
+	for f, _ := range funcSummaryMap {
+		for _, c := range f.AnonFuncs {
+			funcSummaryMap[c].isLambda = true
 		}
 	}
+
+	// per function
+	luPairs := []*luPair{}
+	for f, _ := range funcSummaryMap {
+		if !isHotFunction(f) {
+			continue
+		}
+		if f.Name() == "main" || f.Name() == "foo" || f.Name() == "bar" {
+			fmt.Println("..")
+		}
+		pairs := collectLUPairs(f, funcSummaryMap, mCallGraph.Nodes)
+		luPairs = append(luPairs, pairs...)
+	}
+
+	// maintain position to LU-pair mapping
+	for _, lu := range luPairs {
+		tokenToLuPair[lu.l.pos()] = lu
+		tokenToLuPair[lu.u.pos()] = lu
+	}
+
 	fmt.Println(len(replacedMutexVal) + len(replacedMutexPtr) + len(replacedRWMutexVal) + len(replacedRWMutexPtr))
 	for _, pkg := range pkgs {
 		usesMap = pkg.TypesInfo.Uses
 		typesMap = pkg.TypesInfo.Types
 		for _, file := range pkg.Syntax {
-			nameToID := make(map[string]string)
-			posToID := make(map[token.Pos]string)
-			id := 0
 			// don't rewrite testing file by default
 			if *rewriteTestFile == false {
 				fName := pkg.Fset.Position(file.Pos()).Filename
@@ -1465,98 +1065,32 @@ func main() {
 
 			// replacePath means the lock is a pointer so we can replace it directly
 			// insertPath indicates the lock is a value and we need to take the address of it.
-			replacePathRWMutex := make([][]ast.Node, 0)
-			insertPathRWMutex := make([][]ast.Node, 0)
-			replacePathMutex := make([][]ast.Node, 0)
-			insertPathMutex := make([][]ast.Node, 0)
-			lambdaPath := make([][]ast.Node, 0)
-			normalPath := make([][]ast.Node, 0)
-			for l := range replacedRWMutexPtr {
-				path, ok := astutil.PathEnclosingInterval(file, l, l)
-				if ok {
-					pathToEndNodePos[path[0]] = l
-					replacePathRWMutex = append(replacePathRWMutex, path)
-					if _, ok := lockInLambdaFunc[l]; ok {
-						lambdaPath = append(lambdaPath, path)
-					} else {
-						normalPath = append(normalPath, path)
-					}
-					if val, ok := nameToID[tokenToName[l]]; ok {
-						posToID[l] = val
-					} else {
-						nameToID[tokenToName[l]] = strconv.Itoa(id)
-						posToID[l] = strconv.Itoa(id)
-						id++
-					}
+
+			// find the pairs that are in this file
+			filteredPoints := map[ast.Node]*luPoint{}
+			for _, lu := range luPairs {
+
+				lPath, ok := astutil.PathEnclosingInterval(file, lu.l.pos(), lu.l.pos())
+				if !ok {
+					continue
 				}
-			}
-			for l := range replacedRWMutexVal {
-				path, ok := astutil.PathEnclosingInterval(file, l, l)
-				if ok {
-					pathToEndNodePos[path[0]] = l
-					insertPathRWMutex = append(insertPathRWMutex, path)
-					if _, ok := lockInLambdaFunc[l]; ok {
-						lambdaPath = append(lambdaPath, path)
-					} else {
-						normalPath = append(normalPath, path)
-					}
-					if val, ok := nameToID[tokenToName[l]]; ok {
-						posToID[l] = val
-					} else {
-						nameToID[tokenToName[l]] = strconv.Itoa(id)
-						posToID[l] = strconv.Itoa(id)
-						id++
-					}
+				uPath, ok := astutil.PathEnclosingInterval(file, lu.u.pos(), lu.u.pos())
+				if !ok {
+					continue
 				}
+				lu.l.astPath = lPath
+				lu.u.astPath = uPath
+				filteredPoints[lPath[0]] = lu.l
+				filteredPoints[uPath[0]] = lu.u
 			}
 
-			for l := range replacedMutexPtr {
-				path, ok := astutil.PathEnclosingInterval(file, l, l)
-				if ok {
-					pathToEndNodePos[path[0]] = l
-					replacePathMutex = append(replacePathMutex, path)
-					if _, ok := lockInLambdaFunc[l]; ok {
-						lambdaPath = append(lambdaPath, path)
-					} else {
-						normalPath = append(normalPath, path)
-					}
-					if val, ok := nameToID[tokenToName[l]]; ok {
-						posToID[l] = val
-					} else {
-						nameToID[tokenToName[l]] = strconv.Itoa(id)
-						posToID[l] = strconv.Itoa(id)
-						id++
-					}
-				}
+			if len(filteredPoints) > 0 {
+				fmt.Printf("%v has %v locks to rewrite\n", prog.Fset.Position(file.Pos()).Filename, len(filteredPoints))
 			}
-			for l := range replacedMutexVal {
-				path, ok := astutil.PathEnclosingInterval(file, l, l)
-				if ok {
-					pathToEndNodePos[path[0]] = l
-					insertPathMutex = append(insertPathMutex, path)
-					if _, ok := lockInLambdaFunc[l]; ok {
-						lambdaPath = append(lambdaPath, path)
-					} else {
-						normalPath = append(normalPath, path)
-					}
-					if val, ok := nameToID[tokenToName[l]]; ok {
-						posToID[l] = val
-					} else {
-						nameToID[tokenToName[l]] = strconv.Itoa(id)
-						posToID[l] = strconv.Itoa(id)
-						id++
-					}
-				}
-			}
-
-			numberOfLocksToChange := len(replacePathRWMutex) + len(insertPathRWMutex) + len(replacePathMutex) + len(insertPathMutex)
-			if numberOfLocksToChange > 0 {
-				fmt.Printf("%v has %v locks to rewrite\n", prog.Fset.Position(file.Pos()).Filename, numberOfLocksToChange)
-			}
-			if numberOfLocksToChange > 0 && writeOutput {
-				fmt.Printf("Number of locks to rewrite %v\n", numberOfLocksToChange)
+			if len(filteredPoints) > 0 && writeOutput {
+				fmt.Printf("Number of locks to rewrite %v\n", len(filteredPoints))
 				collectBlkstmt(file, pkg)
-				ast := rewriteAST(file, pkg, &replacePathRWMutex, &insertPathRWMutex, &replacePathMutex, &insertPathMutex, &lambdaPath, &normalPath, posToID)
+				ast := rewriteAST(file, pkg, filteredPoints)
 				filename := prog.Fset.Position(ast.Pos()).Filename
 				writeAST(ast, inputFile, pkg, filename)
 			}

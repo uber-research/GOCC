@@ -13,8 +13,8 @@ import "sync"
 func foo(m, n *sync.Mutex) {
 	m.Lock()
 	n.Lock()
-	m.Unlock()
 	n.Unlock()
+	m.Unlock()
 }
 
 // test different types of Locks
