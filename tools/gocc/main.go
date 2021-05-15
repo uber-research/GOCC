@@ -695,6 +695,25 @@ func singlePathContains(singlePath []ast.Node, curPos token.Pos) bool {
 	return false
 }
 
+// 95  .  .  .  .  .  2: *ast.AssignStmt {
+//     96  .  .  .  .  .  .  Lhs: []ast.Expr (len = 1) {
+//     97  .  .  .  .  .  .  .  0: *ast.Ident {
+//     98  .  .  .  .  .  .  .  .  NamePos: foo:9:9
+//     99  .  .  .  .  .  .  .  .  Name: "_"
+//    100  .  .  .  .  .  .  .  .  Obj: nil
+//    101  .  .  .  .  .  .  .  }
+//    102  .  .  .  .  .  .  }
+//    103  .  .  .  .  .  .  TokPos: foo:9:11
+//    104  .  .  .  .  .  .  Tok: =
+//    105  .  .  .  .  .  .  Rhs: []ast.Expr (len = 1) {
+//    106  .  .  .  .  .  .  .  0: *ast.Ident {
+//    107  .  .  .  .  .  .  .  .  NamePos: foo:9:13
+//    108  .  .  .  .  .  .  .  .  Name: "n"
+//    109  .  .  .  .  .  .  .  .  Obj: *(obj @ 56)
+//    110  .  .  .  .  .  .  .  }
+//    111  .  .  .  .  .  .  }
+//    112  .  .  .  .  .  }
+
 // adds context variable definition at the beginning of the function's statement list
 func addContextInitStmt(stmtsList *[]ast.Stmt, sigPos token.Pos, count int) {
 	for i := 0; i < count; i++ {
@@ -703,8 +722,15 @@ func addContextInitStmt(stmtsList *[]ast.Stmt, sigPos token.Pos, count int) {
 			TokPos: sigPos, // use concrete position to avoid being split by a comment leading to syntax error
 			Tok:    token.DEFINE,
 			Rhs:    []ast.Expr{ast.NewIdent("rtm.OptiLock{}")}}
+		newAsign := ast.AssignStmt{
+			Lhs:    []ast.Expr{ast.NewIdent("_")},
+			TokPos: sigPos,
+			Tok:    token.ASSIGN,
+			Rhs:    []ast.Expr{ast.NewIdent(majicLockName + strconv.Itoa(i))},
+		}
 		var newStmtsList []ast.Stmt
 		newStmtsList = append(newStmtsList, &newStmt)
+		newStmtsList = append(newStmtsList, &newAsign)
 		newStmtsList = append(newStmtsList, (*stmtsList)...)
 		*stmtsList = newStmtsList
 	}
