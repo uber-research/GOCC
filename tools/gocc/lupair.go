@@ -670,24 +670,28 @@ func (s *functionSummary) compute(cgNode *callgraph.Node) {
 	}
 }
 
-func (s *functionSummary) updateMetrics(pairsNonDefer [3]int, pairDefer [3]int) {
+func (s *functionSummary) updateMetrics(candidates [3]int, pairsNonDefer [3]int, pairDefer [3]int) {
 	s.metric.mLock = len(s.m.l)
 	s.metric.mUnlock = len(s.m.u)
 	s.metric.mDeferUnlock = len(s.m.d)
 	s.metric.pairedMlock = pairsNonDefer[0]
 	s.metric.pairedMDeferlock = pairDefer[0]
+	s.metric.candidateMutex = candidates[0]
 
 	s.metric.wLock = len(s.w.l)
 	s.metric.wUnlock = len(s.w.u)
 	s.metric.wDeferUnlock = len(s.w.d)
 	s.metric.pairedWlock = pairsNonDefer[1]
 	s.metric.pairedWDeferlock = pairDefer[1]
+	s.metric.candidateWMutex = candidates[1]
 
 	s.metric.rLock = len(s.r.l)
 	s.metric.rUnlock = len(s.r.u)
 	s.metric.rDeferUnlock = len(s.r.d)
 	s.metric.pairedRlock = pairsNonDefer[2]
 	s.metric.pairedRDeferlock = pairDefer[2]
+	s.metric.candidateRMutex = candidates[2]
+
 }
 
 func collectLUPairs(f *ssa.Function, funcSummaryMap map[*ssa.Function]*functionSummary, cg map[*ssa.Function]*callgraph.Node) []*luPair {
@@ -704,6 +708,7 @@ func collectLUPairs(f *ssa.Function, funcSummaryMap map[*ssa.Function]*functionS
 	numPairsInFunction := 0
 	pairsNonDefer := [3]int{0, 0, 0}
 	pairsDefer := [3]int{0, 0, 0}
+	candidates := [3]int{0, 0, 0}
 
 	for pairIdx, pt := range []*groupOps{m, r, w} {
 		if len(pt.d) > 1 {
@@ -729,6 +734,7 @@ func collectLUPairs(f *ssa.Function, funcSummaryMap map[*ssa.Function]*functionS
 			alreadyMatched[u] = emptyStruct
 			candidateLUPairs = append(candidateLUPairs, &luPair{l: l, u: u, f: f})
 		}
+		candidates[pairIdx] = len(candidateLUPairs)
 		for _, lup := range candidateLUPairs {
 			lup.calculateRegion()
 			if !lup.checkRegionSafety(f, funcSummaryMap, cg) {
@@ -759,7 +765,7 @@ func collectLUPairs(f *ssa.Function, funcSummaryMap map[*ssa.Function]*functionS
 		}
 	}
 
-	summary.updateMetrics(pairsNonDefer, pairsDefer)
+	summary.updateMetrics(candidates, pairsNonDefer, pairsDefer)
 
 	return legalLUPairs
 }
