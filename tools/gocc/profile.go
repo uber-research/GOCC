@@ -25,6 +25,9 @@ var _hotFuncMap map[string]empty = map[string]empty{}
 
 // add paired lock/unlock position in lockInfo
 func isHotFunction(f *ssa.Function) bool {
+	if f.Pkg == nil {
+		return false
+	}
 	pkgPath := f.Pkg.Pkg.Path()
 	splits := strings.Split(normalizeFunctionName(pkgPath), "/")
 	canonicalName := splits[len(splits)-1]

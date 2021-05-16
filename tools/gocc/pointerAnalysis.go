@@ -50,6 +50,7 @@ func collectPointsToSet(ssapkgs []*ssa.Package, pts map[*luPoint]ssa.Instruction
 	for k, _ := range pts {
 		val := k.mutexValue()
 		pc.Queries[val] = struct{}{}
+		//	pc.IndirectQueries[val] = struct{}{}
 		valToLUPointMap[val] = append(valToLUPointMap[val], k)
 	}
 
@@ -69,7 +70,21 @@ func collectPointsToSet(ssapkgs []*ssa.Package, pts map[*luPoint]ssa.Instruction
 		}
 
 		for _, pt := range pts {
-			pt.setPointsToSet(v.PointsTo())
+			pt.setAliasingPointer(v)
 		}
 	}
+	/*
+		for k, v := range result.IndirectQueries {
+			pts, ok := valToLUPointMap[k]
+			if !ok {
+				panic("Why is it not present in the map?")
+			}
+			if len(pts) == 0 {
+				panic("Why len(pts) == 0  ?")
+			}
+
+			for _, pt := range pts {
+				pt.setIndirectPointsToSet(v.PointsTo())
+			}
+		}*/
 }

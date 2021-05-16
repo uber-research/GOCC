@@ -13,6 +13,7 @@ import (
 	"flag"
 	"fmt"
 	"go/token"
+	"log"
 	"os"
 	"strconv"
 	"strings"
@@ -62,6 +63,9 @@ var _writeOutput bool = true
 var _outputPath string
 
 // generate the name of the packages that violates HTM
+//var _blockList []string = []string{"os.", "io.", "fmt.", "runtime.", "syscall."}
+//var _blockedPkg []string = []string{"os", "io", "fmt", "runtime", "syscall"}
+
 var _blockList []string = []string{"os.", "io.", "fmt.", "runtime.", "syscall."}
 var _blockedPkg []string = []string{"os", "io", "fmt", "runtime", "syscall"}
 
@@ -123,6 +127,9 @@ func checkBlockList(rcv ssa.Value) bool {
 }
 
 func checkBlockListStr(pkg *ssa.Package) bool {
+	if pkg == nil {
+		return false
+	}
 	for _, name := range _blockedPkg {
 		if pkg.Pkg.Name() == name {
 			return true
@@ -173,13 +180,17 @@ func isSameLock(lockVal, unlockVal ssa.Value) bool {
 	return false
 }
 
+const _tally = "/Users/milind//gocode/src/github.com/uber-go/tally/"
+
 func main() {
 	// command-line argument
 	dryrunPtr := flag.Bool("dryrun", false, "indicates if AST will be written out or not")
 	statsPtr := flag.Bool("stats", false, "dump out the stats information of the locks")
+	verbose := flag.Bool("verbose", true, "verbose output")
 
 	var inputFile string
-	flag.StringVar(&inputFile, "input", "testdata/test26.go", "source file to analyze")
+	//	flag.StringVar(&inputFile, "input", "testdata/test26.go", "source file to analyze")
+	flag.StringVar(&inputFile, "input", _tally, "source file to analyze")
 
 	var profilePath string
 	flag.StringVar(&profilePath, "profile", "", "profiling of hot function")
@@ -190,6 +201,8 @@ func main() {
 
 	flag.Parse()
 
+	// HACK
+	//*syntheticPtr = true
 	if inputFile == "" {
 		fmt.Println("Please provide the input!")
 		flag.PrintDefaults()
@@ -229,7 +242,7 @@ func main() {
 		_pkgName[pkg.Name] = emptyStruct
 	}
 
-	prog, ssapkgs := ssautil.AllPackages(pkgs, ssa.NaiveForm|ssa.GlobalDebug)
+	prog, ssapkgs := ssautil.AllPackages(pkgs /*ssa.BuilderMode(0)*/, ssa.NaiveForm|ssa.GlobalDebug)
 	// prog, ssapkgs := ssautil.AllPackages(pkgs, ssa.GlobalDebug)
 	libbuilder.BuildPackages(prog, ssapkgs, true, true)
 	mCallGraph := libcg.BuildRtaCG(prog, true)
@@ -238,6 +251,9 @@ func main() {
 
 	funcSummaryMap := map[*ssa.Function]*functionSummary{}
 	globalLUPoints := map[*luPoint]ssa.Instruction{}
+	globalLUFunc := map[*luPoint]*ssa.Function{}
+
+	pkgLpoints := map[string]int{}
 
 	for node := range mCallGraph.Nodes {
 		m, r, w, ptToIns, insToPt := collectLUPoints(node)
@@ -251,12 +267,28 @@ func main() {
 		}
 		for k, v := range ptToIns {
 			globalLUPoints[k] = v
+			globalLUFunc[k] = node
 		}
+
+		if node.Pkg == nil {
+			continue
+		}
+		pkg := node.Pkg.Pkg.Name()
+
+		if _, ok := pkgLpoints[pkg]; !ok {
+			pkgLpoints[pkg] = len(ptToIns)
+		} else {
+			pkgLpoints[pkg] += len(ptToIns)
+		}
+
 		//We'll compute the remaining summary after alias analysis
 	}
 
 	// Do alias analysis
 	collectPointsToSet(ssapkgs, globalLUPoints, _isSingleFile, *syntheticPtr)
+	if *verbose {
+		log.Printf("globalLUPoints = %d", len(globalLUPoints))
+	}
 
 	// Greedily compute function summaries (can be done on need basis also)
 	for f, n := range mCallGraph.Nodes {
@@ -276,13 +308,48 @@ func main() {
 		if !isHotFunction(f) {
 			continue
 		}
-		if f.Name() == "main" || f.Name() == "foo" || f.Name() == "bar" {
-			fmt.Println("..")
-		}
+		//		if f.Name() == "Counter" /*|| f.Name() == "foo" || f.Name() == "bax" */ {
+		//			fmt.Println("..")
+		//		}
 		pairs := collectLUPairs(f, funcSummaryMap, mCallGraph.Nodes)
 		luPairs = append(luPairs, pairs...)
 	}
 
+	log.Printf("total luPairs = %d", len(luPairs))
+	// order by package
+	pkgLupair := map[string][]*luPair{}
+	for _, p := range luPairs {
+		f, _ := globalLUFunc[p.l]
+		if f.Pkg == nil {
+			continue
+		}
+		pkg := f.Pkg.Pkg.Name()
+
+		if v, ok := pkgLupair[pkg]; !ok {
+			pkgLupair[pkg] = []*luPair{p}
+		} else {
+			pkgLupair[pkg] = append(v, p)
+		}
+	}
+
+	if *verbose {
+		log.Printf("Num pkgs containing at least one lock =  %d\n", len(pkgLpoints))
+		log.Printf("Num pkgs containing at least one paired lock =  %d\n", len(pkgLupair))
+		for p, sl := range pkgLupair {
+			for _, s := range sl {
+				f, _ := globalLUFunc[s.l]
+				log.Printf("lupair in pkg %v, func %v\n", p, f)
+			}
+		}
+		for p, num := range pkgLpoints {
+			sl, ok := pkgLupair[p]
+			lenPairs := 0
+			if ok {
+				lenPairs = len(sl)
+			}
+			log.Printf("pkg %v: lupoints = %d, lupairs= %d\n", p, num, lenPairs)
+		}
+	}
 	mapSSAtoAST(prog, pkgs, luPairs, inputFile, *rewriteTestFile)
 
 	if *statsPtr {

@@ -11,6 +11,7 @@ package main
 import (
 	"go/ast"
 	"go/token"
+	"log"
 	"sort"
 
 	"golang.org/x/tools/go/callgraph"
@@ -54,7 +55,7 @@ type luPoint struct {
 	i         ssa.Instruction
 	callC     ssa.CallCommon
 	idx       int
-	pts       pointer.PointsToSet
+	ptr       pointer.Pointer
 	kind      luPointType
 	mutexVal  ssa.Value
 	isPointer bool
@@ -263,23 +264,60 @@ func (p *luPoint) objName() string {
 }
 
 func (p *luPoint) mutexValue() ssa.Value {
+	//	fmt.Printf("mutexValue = %v, %v\n", p.callC.Args[0].Type(), p.callC.Args[0])
 	return p.callC.Args[0]
 }
 
 func (l *luPoint) pointsToSet() pointer.PointsToSet {
-	return l.pts
+	return l.ptr.PointsTo()
 }
 
-func (l *luPoint) setPointsToSet(p pointer.PointsToSet) {
-	l.pts = p
+// func (l *luPoint) setIndirectPointsToSet(p pointer.PointsToSet) {
+// 	l.indPts = p
+// }
+
+func (l *luPoint) setAliasingPointer(p pointer.Pointer) {
+	l.ptr = p
 }
 
 func (l *luPoint) call() ssa.CallCommon {
 	return l.callC
 }
 
+func (l *luPoint) nilLabels(u *luPoint) bool {
+	a := l.ptr.PointsTo().Labels()
+	b := u.ptr.PointsTo().Labels()
+	if len(a) == 0 && len(b) == 0 {
+		return true
+	}
+	return false
+}
+
+// TODO: investigate why some pointers have NIL labels.
+// Sometimes, when two points even though point to the same lock, their lables are nil and end up being reported as NON intersecting.
+/*
+For example this tally code:
+68 func (s *scope) Counter(name string) Counter {
+269         name = s.sanitizer.Name(name)
+270         if c, ok := s.counter(name); ok {
+271                 return c
+272         }
+273
+274         s.cm.Lock()
+275         defer s.cm.Unlock()
+
+To match more locks, we use this trick to match any two NIL labels set to be same.
+However, dont use this logic when matching (rejecting) aliases in a region or between functions since it will reject more pairs.
+*/
+func (l *luPoint) mayBeSameMutexNilsAreSame(u *luPoint) bool {
+	if l.mayBeSameMutex(u) {
+		return true
+	}
+	return l.nilLabels(u)
+}
+
 func (l *luPoint) mayBeSameMutex(u *luPoint) bool {
-	return l.pts.Intersects(u.pointsToSet())
+	return l.ptr.PointsTo().Intersects(u.ptr.PointsTo())
 }
 
 func (l *luPoint) getOptiMethod() string {
@@ -379,7 +417,8 @@ func nearestIntersectingUnlock(l *luPoint, pdom *ssa.BasicBlock, ups map[*ssa.Ba
 			continue
 		}
 
-		if l.mayBeSameMutex(u) {
+		// TODO: investigate more match nil Labels
+		if l.mayBeSameMutexNilsAreSame(u) {
 			return u, true
 		}
 	}
@@ -410,7 +449,7 @@ func nearestIntersectingDeferUnlockBeforeLock(l *luPoint, dom *ssa.BasicBlock, d
 			continue
 		}
 
-		if l.mayBeSameMutex(uPoints[i]) {
+		if l.mayBeSameMutexNilsAreSame(uPoints[i]) {
 			return uPoints[i], true
 		}
 	}
@@ -639,6 +678,11 @@ func collectLUPairs(f *ssa.Function, funcSummaryMap map[*ssa.Function]*functionS
 	// Deal with pairing by type
 	numPairsInFunction := 0
 	for _, pt := range []*groupOps{m, r, w} {
+		if len(pt.d) > 1 {
+			log.Printf("Ignoring function %v because two defer unlocks in the same function is not supported\n", f)
+			break
+		}
+
 		candidateLUPairs := make([]*luPair, 0)
 		postOrderLPoint := orderLocksByPostOrderInDomtree(f, pt.l)
 		blk2Ulk := blockToUnlockPointMapAscending(pt.u)

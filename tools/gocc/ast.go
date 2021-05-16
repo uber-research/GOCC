@@ -31,6 +31,8 @@ import (
 // since it will have different namescope
 var _lockInLambdaFunc map[token.Pos]bool
 
+const _rtmLibPath = "github.com/uber-research/GOCC/tools/gocc/rtmlib"
+
 // this map will keep the all blkstmt position whose parent is funclit
 var _blkstmtMap map[token.Pos]bool = map[token.Pos]bool{}
 
@@ -117,6 +119,8 @@ func addContextInitStmt(stmtsList *[]ast.Stmt, sigPos token.Pos, count map[int]e
 }
 
 func processASTFile(pkg *packages.Package, file *ast.File, luPairs []*luPair) (map[ast.Node]*luPoint, map[*ast.CallExpr]*ast.CallExpr, map[*ast.FuncDecl]map[int]empty, map[*ast.FuncLit]map[int]empty) {
+
+	log.Printf("AST file %v\n", file.Name.Name)
 	typesMap := pkg.TypesInfo.Types
 	filteredPoints := map[ast.Node]*luPoint{}
 	conversionMap := map[*ast.CallExpr]*ast.CallExpr{}
@@ -302,7 +306,7 @@ func rewriteAST(f ast.Node, pkg *packages.Package, conversionMap map[*ast.CallEx
 						Path: &ast.BasicLit{
 							ValuePos: n.Path.ValuePos,
 							Kind:     n.Path.Kind,
-							Value:    strconv.Quote("github.com/lollllcat/GOCC/tools/gocc/rtmlib"),
+							Value:    strconv.Quote(_rtmLibPath),
 						},
 						Comment: n.Comment,
 						EndPos:  n.EndPos,
