@@ -12,16 +12,13 @@ import (
 	"bufio"
 	"flag"
 	"fmt"
-	"go/ast"
 	"go/token"
-	"go/types"
 	"os"
 	"strconv"
 	"strings"
 
 	libbuilder "github.com/uber-research/GOCC/lib/builder"
 	libcg "github.com/uber-research/GOCC/lib/callgraph"
-	"golang.org/x/tools/go/ast/astutil"
 	"golang.org/x/tools/go/callgraph"
 	"golang.org/x/tools/go/packages"
 	"golang.org/x/tools/go/ssa"
@@ -32,9 +29,6 @@ import (
 const _optiLockName = "optiLock"
 
 var majicLockID = 0
-
-var usesMap map[*ast.Ident]types.Object
-var typesMap map[ast.Expr]types.TypeAndValue
 
 // _isSingleFile differentiate a single file and a package
 var _isSingleFile bool
@@ -180,18 +174,12 @@ func isSameLock(lockVal, unlockVal ssa.Value) bool {
 }
 
 func main() {
-	// lock positions to rewrite
-	replacedRWMutexPtr := make(map[token.Pos]bool)
-	replacedRWMutexVal := make(map[token.Pos]bool)
-	replacedMutexPtr := make(map[token.Pos]bool)
-	replacedMutexVal := make(map[token.Pos]bool)
-
 	// command-line argument
 	dryrunPtr := flag.Bool("dryrun", false, "indicates if AST will be written out or not")
 	statsPtr := flag.Bool("stats", false, "dump out the stats information of the locks")
 
 	var inputFile string
-	flag.StringVar(&inputFile, "input", "testdata/test24.go", "source file to analyze")
+	flag.StringVar(&inputFile, "input", "testdata/test23.go", "source file to analyze")
 
 	var profilePath string
 	flag.StringVar(&profilePath, "profile", "", "profiling of hot function")
@@ -295,59 +283,8 @@ func main() {
 		luPairs = append(luPairs, pairs...)
 	}
 
-	// maintain position to LU-pair mapping
-	for _, lu := range luPairs {
-		_tokenToLuPair[lu.l.pos()] = lu
-		_tokenToLuPair[lu.u.pos()] = lu
-	}
+	mapSSAtoAST(prog, pkgs, luPairs, inputFile, *rewriteTestFile)
 
-	fmt.Println(len(replacedMutexVal) + len(replacedMutexPtr) + len(replacedRWMutexVal) + len(replacedRWMutexPtr))
-	for _, pkg := range pkgs {
-		usesMap = pkg.TypesInfo.Uses
-		typesMap = pkg.TypesInfo.Types
-		for _, file := range pkg.Syntax {
-			// don't rewrite testing file by default
-			if *rewriteTestFile == false {
-				fName := pkg.Fset.Position(file.Pos()).Filename
-				if strings.HasSuffix(fName, "_test.go") {
-					// fmt.Printf("%v is skipped since it is a testing file\n", fName)
-					continue
-				}
-			}
-
-			// replacePath means the lock is a pointer so we can replace it directly
-			// insertPath indicates the lock is a value and we need to take the address of it.
-
-			// find the pairs that are in this file
-			filteredPoints := map[ast.Node]*luPoint{}
-			for _, lu := range luPairs {
-
-				lPath, ok := astutil.PathEnclosingInterval(file, lu.l.pos(), lu.l.pos())
-				if !ok {
-					continue
-				}
-				uPath, ok := astutil.PathEnclosingInterval(file, lu.u.pos(), lu.u.pos())
-				if !ok {
-					continue
-				}
-				lu.l.astPath = lPath
-				lu.u.astPath = uPath
-				filteredPoints[lPath[0]] = lu.l
-				filteredPoints[uPath[0]] = lu.u
-			}
-
-			if len(filteredPoints) > 0 {
-				fmt.Printf("%v has %v locks to rewrite\n", prog.Fset.Position(file.Pos()).Filename, len(filteredPoints))
-			}
-			if len(filteredPoints) > 0 && _writeOutput {
-				fmt.Printf("Number of locks to rewrite %v\n", len(filteredPoints))
-				collectBlkstmt(file, pkg)
-				ast := rewriteAST(file, pkg, filteredPoints)
-				filename := prog.Fset.Position(ast.Pos()).Filename
-				writeAST(ast, inputFile, pkg, filename)
-			}
-		}
-	}
 	if *statsPtr {
 		inputFile = strings.Replace(inputFile, "/", "_", -1)
 

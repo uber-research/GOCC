@@ -31,6 +31,7 @@ const (
 	RUNLOCK                   = iota
 	DEFER_RUNLOCK             = iota
 	UNKNOWN                   = iota
+	TYPE_MAX                  = iota
 )
 const _intMax = int(^uint(0) >> 1)
 
@@ -279,6 +280,14 @@ func (l *luPoint) call() ssa.CallCommon {
 
 func (l *luPoint) mayBeSameMutex(u *luPoint) bool {
 	return l.pts.Intersects(u.pointsToSet())
+}
+
+func (l *luPoint) getOptiMethod() string {
+	return luTypeToStr[l.luType()].optiMethodName
+}
+
+func (l *luPoint) getPromotedIdentifier() string {
+	return luTypeToStr[l.luType()].promotedId
 }
 
 func (l *luPoint) isDefer() bool {
