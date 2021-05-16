@@ -179,7 +179,7 @@ func main() {
 	statsPtr := flag.Bool("stats", false, "dump out the stats information of the locks")
 
 	var inputFile string
-	flag.StringVar(&inputFile, "input", "testdata/test23.go", "source file to analyze")
+	flag.StringVar(&inputFile, "input", "testdata/test25.go", "source file to analyze")
 
 	var profilePath string
 	flag.StringVar(&profilePath, "profile", "", "profiling of hot function")
