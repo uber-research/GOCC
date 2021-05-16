@@ -238,6 +238,33 @@ func localCheck(blks []*ssa.BasicBlock) bool {
 	return true
 }
 
+func recursiveCheck(ssaF *ssa.Function, visitedFunc map[*ssa.Function]bool, node callgraph.Node) bool {
+	if _, ok := visitedFunc[ssaF]; ok {
+		return mapFuncSafety[ssaF]
+	}
+
+	if safe, ok := mapFuncSafety[ssaF]; ok {
+		if !safe {
+			return false
+		} else {
+			visitedFunc[ssaF] = true
+
+			for _, edge := range node.Out {
+				// if mapFuncSafety[edge.Callee.Func] == false {
+				if !recursiveCheck(edge.Callee.Func, visitedFunc, *edge.Callee) {
+					delete(visitedFunc, ssaF)
+					mapFuncSafety[ssaF] = false
+					return false
+				}
+			}
+			delete(visitedFunc, ssaF)
+		}
+	} else {
+		panic("the call graph doesn't contain the function, you should never reach here")
+	}
+	return true
+}
+
 // check if single insturction is violating HTM or not
 func checkInst(ins ssa.Instruction) bool {
 	// no go func() in the critical section
@@ -253,8 +280,9 @@ func checkInst(ins ssa.Instruction) bool {
 			nodeInGraph, ok := mCallGraph.Nodes[curNode]
 			if ok {
 				for _, edge := range nodeInGraph.Out {
-					if edge.Site.Common().Value.String() == callRcv.String() {
-						if mapFuncSafety[edge.Callee.Func] == false {
+					visitedFunc := make(map[*ssa.Function]bool)
+					if edge.Site == ins {
+						if recursiveCheck(edge.Callee.Func, visitedFunc, *edge.Callee) {
 							return false
 						}
 					}
@@ -270,8 +298,9 @@ func checkInst(ins ssa.Instruction) bool {
 			nodeInGraph, ok := mCallGraph.Nodes[curNode]
 			if ok {
 				for _, edge := range nodeInGraph.Out {
-					if edge.Site.Common().Value.String() == callRcv.String() {
-						if mapFuncSafety[edge.Callee.Func] == false {
+					visitedFunc := make(map[*ssa.Function]bool)
+					if edge.Site == ins {
+						if recursiveCheck(edge.Callee.Func, visitedFunc, *edge.Callee) {
 							return false
 						}
 					}
