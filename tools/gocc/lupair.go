@@ -109,10 +109,12 @@ func (lup *luPair) checkRegionSafety(f *ssa.Function, summary map[*ssa.Function]
 		// second, the block should contain NO LUpoint that intersects with this LU-pair.
 		for _, i := range b.Instrs {
 			if unsafeInst(i, cgNode) {
+				sefSummary.metric.intraRegionIO++
 				return false
 			}
 			if pt, ok := sefSummary.insToPt[i]; ok {
 				if pt.mayBeSameMutex(lup.l) || pt.mayBeSameMutex(lup.u) {
+					sefSummary.metric.intraRegionAlias++
 					return false
 				}
 			}
@@ -137,7 +139,7 @@ func (lup *luPair) checkRegionSafety(f *ssa.Function, summary map[*ssa.Function]
 		if fSummary, ok := summary[callee]; !ok {
 			panic("summary[callee] empty!")
 		} else {
-			if !fSummary.safeToCallFlat(lup.l) || !fSummary.safeToCallFlat(lup.u) {
+			if !fSummary.safeToCallFlat(lup.l, sefSummary) || !fSummary.safeToCallFlat(lup.u, sefSummary) {
 				return false
 			}
 		}
@@ -616,6 +618,7 @@ type functionSummary struct {
 	m               *groupOps
 	r               *groupOps
 	w               *groupOps
+	metric          metrics
 }
 
 func (f *functionSummary) mayAlias(l *luPoint) bool {
@@ -627,11 +630,13 @@ func (f *functionSummary) mayAlias(l *luPoint) bool {
 	return false
 }
 
-func (f *functionSummary) safeToCallFlat(l *luPoint) bool {
+func (f *functionSummary) safeToCallFlat(l *luPoint, caller *functionSummary) bool {
 	if f.safe == false {
+		caller.metric.interRegionIO++
 		return false
 	}
 	if f.mayAlias(l) {
+		caller.metric.interRegionAlias++
 		return false
 	}
 	return true
@@ -665,6 +670,26 @@ func (s *functionSummary) compute(cgNode *callgraph.Node) {
 	}
 }
 
+func (s *functionSummary) updateMetrics(pairsNonDefer [3]int, pairDefer [3]int) {
+	s.metric.mLock = len(s.m.l)
+	s.metric.mUnlock = len(s.m.u)
+	s.metric.mDeferUnlock = len(s.m.d)
+	s.metric.pairedMlock = pairsNonDefer[0]
+	s.metric.pairedMDeferlock = pairDefer[0]
+
+	s.metric.wLock = len(s.w.l)
+	s.metric.wUnlock = len(s.w.u)
+	s.metric.wDeferUnlock = len(s.w.d)
+	s.metric.pairedWlock = pairsNonDefer[1]
+	s.metric.pairedWDeferlock = pairDefer[1]
+
+	s.metric.rLock = len(s.r.l)
+	s.metric.rUnlock = len(s.r.u)
+	s.metric.rDeferUnlock = len(s.r.d)
+	s.metric.pairedRlock = pairsNonDefer[2]
+	s.metric.pairedRDeferlock = pairDefer[2]
+}
+
 func collectLUPairs(f *ssa.Function, funcSummaryMap map[*ssa.Function]*functionSummary, cg map[*ssa.Function]*callgraph.Node) []*luPair {
 
 	summary, ok := funcSummaryMap[f]
@@ -677,7 +702,10 @@ func collectLUPairs(f *ssa.Function, funcSummaryMap map[*ssa.Function]*functionS
 
 	// Deal with pairing by type
 	numPairsInFunction := 0
-	for _, pt := range []*groupOps{m, r, w} {
+	pairsNonDefer := [3]int{0, 0, 0}
+	pairsDefer := [3]int{0, 0, 0}
+
+	for pairIdx, pt := range []*groupOps{m, r, w} {
 		if len(pt.d) > 1 {
 			log.Printf("Ignoring function %v because two defer unlocks in the same function is not supported\n", f)
 			break
@@ -694,6 +722,7 @@ func collectLUPairs(f *ssa.Function, funcSummaryMap map[*ssa.Function]*functionS
 		for _, l := range postOrderLPoint {
 			u := getNearestUpoint(l, blk2Ulk, blk2DUlk, alreadyMatched)
 			if u == nil {
+				summary.metric.dominaceRelation++
 				continue
 			}
 			// take it away from further matching
@@ -721,8 +750,16 @@ func collectLUPairs(f *ssa.Function, funcSummaryMap map[*ssa.Function]*functionS
 			lup.u.id = numPairsInFunction
 			lup.l.isLambda = summary.isLambda
 			lup.u.isLambda = summary.isLambda
+			if lup.u.isDefer() {
+				pairsDefer[pairIdx]++
+			} else {
+				pairsNonDefer[pairIdx]++
+			}
 
 		}
 	}
+
+	summary.updateMetrics(pairsNonDefer, pairsDefer)
+
 	return legalLUPairs
 }
