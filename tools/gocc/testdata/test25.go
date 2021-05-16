@@ -34,7 +34,7 @@ func bar() {
 	}()
 
 	xx.Lock()
-	yy.Lock()
+	xx.Unlock()
 
 	mm := &xx
 	nn := &yy
@@ -61,7 +61,7 @@ func baz() {
 	}()
 
 	xx.Lock()
-	yy.Lock()
+	xx.Unlock()
 
 	mm := &xx
 	nn := &yy
@@ -88,7 +88,7 @@ func ban() {
 	}()
 
 	xx.Lock()
-	yy.Lock()
+	xx.Unlock()
 
 	mm := xx
 	nn := yy

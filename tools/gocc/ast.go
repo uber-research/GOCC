@@ -163,7 +163,7 @@ func processASTFile(pkg *packages.Package, file *ast.File, luPairs []*luPair) (m
 				}
 			}
 
-			if !pt.isPointer {
+			if pt.isPointer {
 				theExpression = &ast.UnaryExpr{
 					Op: token.AND,
 					X:  theExpression,
