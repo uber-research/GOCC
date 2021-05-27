@@ -19,6 +19,7 @@ import (
 	"go/types"
 	"log"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -105,7 +106,16 @@ func singlePathContains(singlePath []ast.Node, curPos token.Pos) bool {
 
 // adds context variable definition at the beginning of the function's statement list
 func addContextInitStmt(stmtsList *[]ast.Stmt, sigPos token.Pos, count map[int]empty) {
+	// Get sorted count for stable diff
+	countSorted := make([]int, len(count))
+	pos := 0
 	for i := range count {
+		countSorted[pos] = i
+		pos++
+	}
+	sort.Ints(countSorted)
+
+	for _, i := range countSorted {
 		newStmt := ast.AssignStmt{
 			Lhs:    []ast.Expr{ast.NewIdent(_optiLockName + strconv.Itoa(i))},
 			TokPos: sigPos, // use concrete position to avoid being split by a comment leading to syntax error

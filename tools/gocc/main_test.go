@@ -9,16 +9,15 @@
 package main
 
 import (
-	"fmt"
 	"io/ioutil"
 	"os/exec"
+	"regexp"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 )
 
 func TestPkgs(t *testing.T) {
-	tempDir := t.TempDir()
 
 	tt := []struct {
 		loc      string
@@ -34,20 +33,34 @@ func TestPkgs(t *testing.T) {
 		},
 	}
 
+	var replaceRegex = regexp.MustCompile(`(?s)\nindex(.*?)\n`)
+
 	for _, tc := range tt {
 		_ = tc
+		defer func() {
+			cmd := []string{"git", "checkout", "--", tc.loc}
+			exec.Command(cmd[0], cmd[1:]...).Output()
+		}()
 		g := NewGOCC(false, false, false, true, true, false, tc.loc)
 		g.Process()
 
 		// Get diff
-		cmd := []string{"git", "diff"}
-		diff, err := exec.Command(cmd[0], cmd[1:]...).Output()
-		fmt.Printf("cmd= %v", cmd)
-		//require.NoError(t, err)
+		cmd := []string{"git", "diff", tc.loc}
+		diff, _ := exec.Command(cmd[0], cmd[1:]...).Output()
 		diffStr := string(diff)
+		//		fmt.Printf("diffStr old = %s\n", diffStr)
+
+		diffStr = replaceRegex.ReplaceAllLiteralString(diffStr, "")
+		//		fmt.Printf("diffStr = %s\n", diffStr)
+
+		// ignore lines starting with index
+
 		recordedDiff, err := ioutil.ReadFile(tc.diffFile)
 		require.NoError(t, err)
 		recordedDiffStr := string(recordedDiff)
+		recordedDiffStr = replaceRegex.ReplaceAllLiteralString(recordedDiffStr, "")
+		//	fmt.Printf("recordedDiffStr = %s\n", recordedDiffStr)
+
 		require.Equal(t, recordedDiffStr, diffStr)
 	}
 }

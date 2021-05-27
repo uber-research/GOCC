@@ -1,7 +1,7 @@
-diff --git a/m3/reporter.go b/m3/reporter.go
+diff --git a/tools/gocc/testdata/src/github.com/uber-go/tally/m3/reporter.go b/tools/gocc/testdata/src/github.com/uber-go/tally/m3/reporter.go
 index 9b6f226..64b6156 100644
---- a/m3/reporter.go
-+++ b/m3/reporter.go
+--- a/tools/gocc/testdata/src/github.com/uber-go/tally/m3/reporter.go
++++ b/tools/gocc/testdata/src/github.com/uber-go/tally/m3/reporter.go
 @@ -23,6 +23,7 @@ package m3
  import (
  	"errors"
@@ -48,10 +48,10 @@ index 9b6f226..64b6156 100644
  }
  
  // Close waits for metrics to be flushed before closing the backend.
-diff --git a/scope.go b/scope.go
-index 66f3aa1..d8c470d 100644
---- a/scope.go
-+++ b/scope.go
+diff --git a/tools/gocc/testdata/src/github.com/uber-go/tally/scope.go b/tools/gocc/testdata/src/github.com/uber-go/tally/scope.go
+index 66f3aa1..a22b96a 100644
+--- a/tools/gocc/testdata/src/github.com/uber-go/tally/scope.go
++++ b/tools/gocc/testdata/src/github.com/uber-go/tally/scope.go
 @@ -21,6 +21,7 @@
  package tally
  
@@ -66,8 +66,8 @@ index 66f3aa1..d8c470d 100644
  func (s *scope) report(r StatsReporter) {
 -	s.cm.RLock()
 +	optiLock3 := rtm.OptiLock{}
-+	optiLock1 := rtm.OptiLock{}
 +	optiLock2 := rtm.OptiLock{}
++	optiLock1 := rtm.OptiLock{}
 +	optiLock3.RLock(&s.cm)
  	for name, counter := range s.counters {
  		counter.report(s.fullyQualifiedName(name), s.tags, r)
@@ -192,10 +192,10 @@ index 66f3aa1..d8c470d 100644
  
  	h, ok := s.histograms[sanitizedName]
  	return h, ok
-diff --git a/scope_registry.go b/scope_registry.go
+diff --git a/tools/gocc/testdata/src/github.com/uber-go/tally/scope_registry.go b/tools/gocc/testdata/src/github.com/uber-go/tally/scope_registry.go
 index 6ed5eb4..0a4c831 100644
---- a/scope_registry.go
-+++ b/scope_registry.go
+--- a/tools/gocc/testdata/src/github.com/uber-go/tally/scope_registry.go
++++ b/tools/gocc/testdata/src/github.com/uber-go/tally/scope_registry.go
 @@ -20,7 +20,10 @@
  
  package tally
@@ -239,10 +239,10 @@ index 6ed5eb4..0a4c831 100644
  
  	if s, ok := r.lockedLookup(key); ok {
  		return s
-diff --git a/stats.go b/stats.go
+diff --git a/tools/gocc/testdata/src/github.com/uber-go/tally/stats.go b/tools/gocc/testdata/src/github.com/uber-go/tally/stats.go
 index 247ee46..aa749dc 100644
---- a/stats.go
-+++ b/stats.go
+--- a/tools/gocc/testdata/src/github.com/uber-go/tally/stats.go
++++ b/tools/gocc/testdata/src/github.com/uber-go/tally/stats.go
 @@ -21,6 +21,7 @@
  package tally
  
@@ -281,12 +281,12 @@ index 247ee46..aa749dc 100644
  }
  
  func (r *timerNoReporterSink) ReportHistogramValueSamples(
-diff --git a/thirdparty/github.com/apache/thrift/lib/go/thrift/server_socket.go b/thirdparty/github.com/apache/thrift/lib/go/thrift/server_socket.go
+diff --git a/tools/gocc/testdata/src/github.com/uber-go/tally/thirdparty/github.com/apache/thrift/lib/go/thrift/server_socket.go b/tools/gocc/testdata/src/github.com/uber-go/tally/thirdparty/github.com/apache/thrift/lib/go/thrift/server_socket.go
 old mode 100755
 new mode 100644
 index d6e9495..7f5c535
---- a/thirdparty/github.com/apache/thrift/lib/go/thrift/server_socket.go
-+++ b/thirdparty/github.com/apache/thrift/lib/go/thrift/server_socket.go
+--- a/tools/gocc/testdata/src/github.com/uber-go/tally/thirdparty/github.com/apache/thrift/lib/go/thrift/server_socket.go
++++ b/tools/gocc/testdata/src/github.com/uber-go/tally/thirdparty/github.com/apache/thrift/lib/go/thrift/server_socket.go
 @@ -20,6 +20,7 @@
  package thrift
  
