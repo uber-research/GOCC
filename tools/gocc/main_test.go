@@ -25,11 +25,25 @@ func TestPkgs(t *testing.T) {
 		name     string
 		diffFile string
 	}{
+		// {
+		// 	loc:      "./testdata/src/github.com/uber-go/tally",
+		// 	name:     "tally",
+		// 	rev:      "164eb6a3c0d4c8c82e5a63a8a12d506f0c9b2637",
+		// 	diffFile: "testdata/tally.diff",
+		// },
+
+		// {
+		// 	loc:      "./testdata/src/github.com/uber-go/zap",
+		// 	name:     "zap",
+		// 	rev:      "5b4722d3797ca2e22f3c16dbe71a97b9c7783c98",
+		// 	diffFile: "testdata/zap.diff",
+		// },
+
 		{
-			loc:      "./testdata/src/github.com/uber-go/tally",
-			name:     "tally",
-			rev:      "164eb6a3c0d4c8c82e5a63a8a12d506f0c9b2637",
-			diffFile: "testdata/tally.diff",
+			loc:      "./testdata/src/github.com/VictoriaMetrics/fastcache",
+			name:     "fastcache",
+			rev:      "5b4722d3797ca2e22f3c16dbe71a97b9c7783c98",
+			diffFile: "testdata/fastcache.diff",
 		},
 	}
 
@@ -37,10 +51,10 @@ func TestPkgs(t *testing.T) {
 
 	for _, tc := range tt {
 		_ = tc
-		defer func() {
-			cmd := []string{"git", "checkout", "--", tc.loc}
-			exec.Command(cmd[0], cmd[1:]...).Output()
-		}()
+		// defer func() {
+		// 	cmd := []string{"git", "checkout", "--", tc.loc}
+		// 	exec.Command(cmd[0], cmd[1:]...).Output()
+		// }()
 		g := NewGOCC(false, false, false, true, true, false, tc.loc)
 		g.Process()
 
