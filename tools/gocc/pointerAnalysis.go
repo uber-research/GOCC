@@ -14,9 +14,9 @@ import (
 )
 
 // collectPointsToSet updates the PointsToSet in each of lPoints, uPoints, and dPoints
-func collectPointsToSet(ssapkgs []*ssa.Package, pts map[*luPoint]ssa.Instruction, isSingleFile, isSynthetic bool) {
+func (g *gocc) collectPointsToSet(ssapkgs []*ssa.Package, pts map[*luPoint]ssa.Instruction) {
 	mainPkg := make([]*ssa.Package, 1)
-	if isSingleFile || !isSynthetic {
+	if g.isSingleFile || !g.synthetic {
 		for _, pkg := range ssapkgs {
 			if pkg != nil && pkg.Pkg.Name() == "main" {
 				mainPkg[0] = pkg

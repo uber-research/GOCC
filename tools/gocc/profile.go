@@ -18,13 +18,8 @@ import (
 	"golang.org/x/tools/go/ssa"
 )
 
-// this flag indicates whether profile is provided or not
-// and a map to record the name if profile exists
-var _profileProvided bool = false
-var _hotFuncMap map[string]empty = map[string]empty{}
-
 // add paired lock/unlock position in lockInfo
-func isHotFunction(f *ssa.Function) bool {
+func (g *gocc) isHotFunction(f *ssa.Function) bool {
 	if f.Pkg == nil {
 		return false
 	}
@@ -34,11 +29,11 @@ func isHotFunction(f *ssa.Function) bool {
 	funcName := normalizeFunctionName(f.RelString(f.Pkg.Pkg))
 	fullFuncName := canonicalName + "." + funcName
 
-	if !_profileProvided {
+	if !g.profileProvided {
 		return true
 	}
 
-	if _, ok := _hotFuncMap[fullFuncName]; !ok {
+	if _, ok := g.hotFuncMap[fullFuncName]; !ok {
 		return false
 	}
 	return true
@@ -64,8 +59,8 @@ func normalizeFunctionName(name string) string {
 	return fName
 }
 
-func initProfile(profilePath string) {
-	_profileProvided = true
+func (g *gocc) initProfile(profilePath string) {
+	g.profileProvided = true
 	f, err := os.Open(profilePath)
 	defer f.Close()
 	if err != nil {
@@ -81,6 +76,6 @@ func initProfile(profilePath string) {
 		if err != nil {
 			panic("profile is wrong")
 		}
-		_hotFuncMap[strings.TrimSpace(line)] = emptyStruct
+		g.hotFuncMap[strings.TrimSpace(line)] = emptyStruct
 	}
 }

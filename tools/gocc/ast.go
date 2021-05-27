@@ -29,7 +29,7 @@ import (
 
 // this map will mark which lock position and paths are in lambda function
 // since it will have different namescope
-var _lockInLambdaFunc map[token.Pos]bool
+//var _lockInLambdaFunc map[token.Pos]bool
 
 const _rtmLibPath = "github.com/uber-research/GOCC/tools/gocc/rtmlib"
 
@@ -76,8 +76,8 @@ func ensureMethodMatch(sel *ast.SelectorExpr, lup *luPoint) bool {
 }
 
 // return if the ssa function is in the given input package so that we can transform
-func inFile(ssaF *ssa.Function) bool {
-	if _, ok := _pkgName[ssaF.Pkg.Pkg.Name()]; ok {
+func (g *gocc) inFile(ssaF *ssa.Function) bool {
+	if _, ok := g.pkgName[ssaF.Pkg.Pkg.Name()]; ok {
 		return true
 	}
 	return false
@@ -247,11 +247,11 @@ func findNearestFunctionLit(pt *luPoint) *ast.FuncLit {
 	return nil
 }
 
-func mapSSAtoAST(prog *ssa.Program, pkgs []*packages.Package, luPairs []*luPair, inputFile string, rewriteTestFile bool) {
+func (g *gocc) mapSSAtoAST(prog *ssa.Program, pkgs []*packages.Package, luPairs []*luPair) {
 	for _, pkg := range pkgs {
 		for _, file := range pkg.Syntax {
 			// don't rewrite testing file by default
-			if rewriteTestFile == false {
+			if g.rewriteTestFile == false {
 				fName := pkg.Fset.Position(file.Pos()).Filename
 				if strings.HasSuffix(fName, "_test.go") {
 					// fmt.Printf("%v is skipped since it is a testing file\n", fName)
@@ -263,11 +263,11 @@ func mapSSAtoAST(prog *ssa.Program, pkgs []*packages.Package, luPairs []*luPair,
 			if len(filteredPoints) > 0 {
 				fmt.Printf("%v has %v locks to rewrite\n", prog.Fset.Position(file.Pos()).Filename, len(filteredPoints))
 			}
-			if len(filteredPoints) > 0 && _writeOutput {
+			if len(filteredPoints) > 0 && !g.dryrun {
 				fmt.Printf("Number of locks to rewrite %v\n", len(filteredPoints))
 				ast := rewriteAST(file, pkg, conversionMap, funcDeclMap, funcLitMap)
 				filename := prog.Fset.Position(ast.Pos()).Filename
-				writeAST(ast, inputFile, pkg, filename)
+				g.writeAST(ast, g.inputFile, pkg, filename)
 			}
 		}
 	}
@@ -333,27 +333,28 @@ func rewriteAST(f ast.Node, pkg *packages.Package, conversionMap map[*ast.CallEx
 	return astutil.Apply(f, nil, postFunc)
 }
 
-func writeAST(f ast.Node, sourceFilePath string, pkg *packages.Package, filename string) {
-	if _writeOutput {
-		fmt.Println("  Writing output to ", filename)
-		info, err := os.Stat(filename)
-		if err != nil {
-			panic(err)
-		}
-		fSize := info.Size()
-		os.Remove(filename)
-		output, err := os.Create(filename)
-		if err != nil {
-			panic(err)
-		}
-		defer output.Close()
-
-		w := bufio.NewWriterSize(output, int(2*fSize))
-		if err := format.Node(w, pkg.Fset, f); err != nil {
-			panic(err)
-		}
-		w.Flush()
+func (g *gocc) writeAST(f ast.Node, sourceFilePath string, pkg *packages.Package, filename string) {
+	if g.dryrun {
+		return
 	}
+	fmt.Println("  Writing output to ", filename)
+	info, err := os.Stat(filename)
+	if err != nil {
+		panic(err)
+	}
+	fSize := info.Size()
+	os.Remove(filename)
+	output, err := os.Create(filename)
+	if err != nil {
+		panic(err)
+	}
+	defer output.Close()
+
+	w := bufio.NewWriterSize(output, int(2*fSize))
+	if err := format.Node(w, pkg.Fset, f); err != nil {
+		panic(err)
+	}
+	w.Flush()
 }
 
 func argContains(args []string, target string) bool {

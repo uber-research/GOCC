@@ -31,9 +31,6 @@ const _optiLockName = "optiLock"
 
 var majicLockID = 0
 
-// _isSingleFile differentiate a single file and a package
-var _isSingleFile bool
-
 // for any lock, lockInfo stores the positions where it locks and (defer) unlocks
 // isValue indicates whether this lock is lock object or pointer in source code
 type lockInfo struct {
@@ -120,19 +117,46 @@ func (m *metrics) sum(a metrics) {
 	m.dominaceRelation += a.dominaceRelation
 }
 
-var _mPkg map[string]int = map[string]int{}
-var lockAliasMap map[ssa.Value][]ssa.Value
-var _pkgName map[string]empty = map[string]empty{}
-
-var _writeOutput bool = true
-var _outputPath string
-
 // generate the name of the packages that violates HTM
 //var _blockList []string = []string{"os.", "io.", "fmt.", "runtime.", "syscall."}
 //var _blockedPkg []string = []string{"os", "io", "fmt", "runtime", "syscall"}
 
 var _blockList []string = []string{"os.", "io.", "fmt.", "runtime.", "syscall."}
 var _blockedPkg []string = []string{"os", "io", "fmt", "runtime", "syscall"}
+
+type gocc struct {
+	mPkg            map[string]int
+	lockAliasMap    map[ssa.Value][]ssa.Value
+	pkgName         map[string]empty
+	hotFuncMap      map[string]empty
+	outputPath      string
+	inputFile       string
+	profilePath     string
+	isSingleFile    bool
+	profileProvided bool
+	rewriteTestFile bool
+	synthetic       bool
+	verbose         bool
+	stat            bool
+	dryrun          bool
+}
+
+func NewGOCC(isSingleFile bool, rewriteTestFile bool, synthetic bool, verbose bool, stat bool, dryrun bool, inputFile string) *gocc {
+	return &gocc{
+		mPkg:            make(map[string]int),
+		lockAliasMap:    make(map[ssa.Value][]ssa.Value),
+		pkgName:         make(map[string]empty),
+		hotFuncMap:      make(map[string]empty),
+		inputFile:       inputFile,
+		isSingleFile:    isSingleFile,
+		profileProvided: false,
+		rewriteTestFile: rewriteTestFile,
+		synthetic:       synthetic,
+		verbose:         verbose,
+		dryrun:          dryrun,
+		stat:            stat,
+	}
+}
 
 func isMutexValue(s string) bool {
 	mutexTypes := []string{"*sync.Mutex", "*sync.RWMutex"}
@@ -231,11 +255,11 @@ func unsafeInst(ins ssa.Instruction, cgNode *callgraph.Node) bool {
 }
 
 // check if two lock receivers are the same, including aliasing analysis
-func isSameLock(lockVal, unlockVal ssa.Value) bool {
+func (g *gocc) isSameLock(lockVal, unlockVal ssa.Value) bool {
 	if lockVal.String() == unlockVal.String() {
 		return true
 	}
-	if aliasSet, ok := lockAliasMap[lockVal]; ok {
+	if aliasSet, ok := g.lockAliasMap[lockVal]; ok {
 		for _, val := range aliasSet {
 			if val.String() == unlockVal.String() {
 				return true
@@ -246,6 +270,8 @@ func isSameLock(lockVal, unlockVal ssa.Value) bool {
 }
 
 const _tally = "/Users/milind//gocode/src/github.com/uber-go/tally/"
+const _gocache = "/Users/milind/gocode/src/github.com/patrickmn/go-cache/"
+const _fastcache = "/Users/milind/gocode/src/github.com/VictoriaMetrics/fastcache"
 
 func dumpMetrics(s map[*ssa.Function]*functionSummary) {
 	var totalMetric metrics
@@ -303,64 +329,32 @@ func dumpMetrics(s map[*ssa.Function]*functionSummary) {
 
 }
 
-func main() {
-	// command-line argument
-	dryrunPtr := flag.Bool("dryrun", false, "indicates if AST will be written out or not")
-	statsPtr := flag.Bool("stats", false, "dump out the stats information of the locks")
-	verbose := flag.Bool("verbose", true, "verbose output")
-
-	var inputFile string
-	//	flag.StringVar(&inputFile, "input", "testdata/test26.go", "source file to analyze")
-	flag.StringVar(&inputFile, "input", _tally, "source file to analyze")
-
-	var profilePath string
-	flag.StringVar(&profilePath, "profile", "", "profiling of hot function")
-
-	syntheticPtr := flag.Bool("synthetic", false, "set true if the synthetic main from transformer is used")
-
-	rewriteTestFile := flag.Bool("rewriteTest", false, "set true if you want to change testing file")
-
-	flag.Parse()
-
-	// HACK
-	//*syntheticPtr = true
-	if inputFile == "" {
-		fmt.Println("Please provide the input!")
-		flag.PrintDefaults()
-		os.Exit(1)
+func (g *gocc) Process() {
+	if info, err := os.Stat(g.profilePath); err == nil && !info.IsDir() {
+		g.initProfile(g.profilePath)
+	} else {
+		log.Println("No valid profiles to apply")
 	}
 
-	if profilePath != "" {
-		initProfile(profilePath)
-	}
-
-	_outputPath = inputFile + "/"
-
-	if *dryrunPtr {
-		_writeOutput = false
+	if g.dryrun {
 		fmt.Println("Running in dryrun mode - modified ASTs will not be written out.")
-	} else {
-		_writeOutput = true
 	}
 
-	if strings.HasSuffix(inputFile, ".go") {
-		_isSingleFile = true
-	} else {
-		_isSingleFile = false
-		inputFile += "/..."
+	if info, err := os.Stat(g.inputFile); err == nil && info.IsDir() {
+		g.inputFile += "/..."
 	}
 
 	var pkgs []*packages.Package
 
 	pkgConfig := &packages.Config{Mode: packages.LoadAllSyntax, Tests: true}
 
-	pkgs, err := packages.Load(pkgConfig, inputFile)
+	pkgs, err := packages.Load(pkgConfig, g.inputFile)
 	if err != nil {
 		panic("something wrong during loading!")
 	}
 
 	for _, pkg := range pkgs {
-		_pkgName[pkg.Name] = emptyStruct
+		g.pkgName[pkg.Name] = emptyStruct
 	}
 
 	prog, ssapkgs := ssautil.AllPackages(pkgs /*ssa.BuilderMode(0)*/, ssa.NaiveForm|ssa.GlobalDebug)
@@ -376,6 +370,7 @@ func main() {
 
 	pkgLpoints := map[string]int{}
 
+	totW := 0
 	for node := range mCallGraph.Nodes {
 		m, r, w, ptToIns, insToPt := collectLUPoints(node)
 		funcSummaryMap[node] = &functionSummary{
@@ -386,6 +381,10 @@ func main() {
 			r:       r,
 			w:       w,
 		}
+		if node.Pkg.Pkg.Name() == "cache" {
+			fmt.Printf("pkg = %s, func = %v, m=%d, r = %d, w = %d\n", node.Pkg.Pkg.Name(), node.Name(), len(m.d)+len(m.l)+len(m.u), len(r.d)+len(r.l)+len(r.u), len(w.d)+len(w.l)+len(w.u))
+		}
+		totW += len(w.d) + len(w.l) + len(w.u)
 		for k, v := range ptToIns {
 			globalLUPoints[k] = v
 			globalLUFunc[k] = node
@@ -404,15 +403,19 @@ func main() {
 
 		//We'll compute the remaining summary after alias analysis
 	}
+	fmt.Printf("totw = %d\n", totW)
 
 	// Do alias analysis
-	collectPointsToSet(ssapkgs, globalLUPoints, _isSingleFile, *syntheticPtr)
-	if *verbose {
+	g.collectPointsToSet(ssapkgs, globalLUPoints)
+	if g.verbose {
 		log.Printf("globalLUPoints = %d", len(globalLUPoints))
 	}
 
 	// Greedily compute function summaries (can be done on need basis also)
 	for f, n := range mCallGraph.Nodes {
+		if f.Pkg != nil && f.Pkg.Pkg.Name() == "cache" {
+			fmt.Println("..")
+		}
 		funcSummaryMap[f].compute(n)
 	}
 
@@ -431,7 +434,7 @@ func main() {
 	// per function
 	luPairs := []*luPair{}
 	for f, _ := range funcSummaryMap {
-		if !isHotFunction(f) {
+		if !g.isHotFunction(f) {
 			continue
 		}
 		//		if f.Name() == "Counter" /*|| f.Name() == "foo" || f.Name() == "bax" */ {
@@ -458,7 +461,7 @@ func main() {
 		}
 	}
 
-	if *verbose {
+	if g.verbose {
 		log.Printf("Num pkgs containing at least one lock =  %d\n", len(pkgLpoints))
 		log.Printf("Num pkgs containing at least one paired lock =  %d\n", len(pkgLupair))
 		for p, sl := range pkgLupair {
@@ -477,12 +480,12 @@ func main() {
 		}
 	}
 	dumpMetrics(funcSummaryMap)
-	mapSSAtoAST(prog, pkgs, luPairs, inputFile, *rewriteTestFile)
+	g.mapSSAtoAST(prog, pkgs, luPairs)
 
-	if *statsPtr {
-		inputFile = strings.Replace(inputFile, "/", "_", -1)
+	if g.stat {
+		g.inputFile = strings.Replace(g.inputFile, "/", "_", -1)
 
-		f, err := os.Create("lockcount/" + inputFile + ".txt")
+		f, err := os.Create("lockcount/" + g.inputFile + ".txt")
 		if err != nil {
 			fmt.Println(err)
 			return
@@ -504,17 +507,49 @@ func main() {
 
 		w.Flush()
 
-		g, err := os.Create("lockDistribution/" + inputFile + ".txt")
+		d, err := os.Create("lockDistribution/" + g.inputFile + ".txt")
 		if err != nil {
 			fmt.Println(err)
 			return
 		}
-		defer g.Close()
+		defer d.Close()
 
-		w2 := bufio.NewWriter(g)
-		for key, value := range _mPkg {
+		w2 := bufio.NewWriter(d)
+		for key, value := range g.mPkg {
 			fmt.Fprintln(w2, key+":"+strconv.Itoa(value))
 		}
 		w2.Flush()
 	}
+}
+
+func main() {
+	// command-line argument
+	dryrunPtr := flag.Bool("dryrun", false, "indicates if AST will be written out or not")
+	statsPtr := flag.Bool("stats", false, "dump out the stats information of the locks")
+	verbose := flag.Bool("verbose", true, "verbose output")
+
+	var inputFile string
+	//	flag.StringVar(&inputFile, "input", "testdata/test26.go", "source file to analyze")
+	flag.StringVar(&inputFile, "input", _fastcache, "source file to analyze")
+
+	var profilePath string
+	flag.StringVar(&profilePath, "profile", "", "profiling of hot function")
+
+	syntheticPtr := flag.Bool("synthetic", false, "set true if the synthetic main from transformer is used")
+
+	rewriteTestFile := flag.Bool("rewriteTest", false, "set true if you want to change testing file")
+
+	flag.Parse()
+
+	// HACK
+	//*syntheticPtr = true
+	if inputFile == "" {
+		fmt.Println("Please provide the input!")
+		flag.PrintDefaults()
+		os.Exit(1)
+	}
+
+	gizer := NewGOCC(strings.HasSuffix(inputFile, ".go"), *rewriteTestFile, *syntheticPtr, *verbose, *statsPtr, *dryrunPtr, inputFile)
+	gizer.Process()
+
 }
