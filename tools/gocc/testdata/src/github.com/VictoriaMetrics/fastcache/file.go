@@ -3,6 +3,7 @@ package fastcache
 import (
 	"encoding/binary"
 	"fmt"
+	rtm "github.com/uber-research/GOCC/tools/gocc/rtmlib"
 	"io"
 	"io/ioutil"
 	"os"
@@ -325,6 +326,7 @@ func (b *bucket) Save(w io.Writer) error {
 }
 
 func (b *bucket) Load(r io.Reader, maxChunks uint64) error {
+	optiLock1 := rtm.OptiLock{}
 	if maxChunks == 0 {
 		return fmt.Errorf("the number of chunks per bucket cannot be zero")
 	}
@@ -389,7 +391,7 @@ func (b *bucket) Load(r io.Reader, maxChunks uint64) error {
 		chunks[currChunkIdx] = chunks[currChunkIdx][:chunkLen]
 	}
 
-	b.mu.Lock()
+	optiLock1.WLock(&b.mu)
 	for _, chunk := range b.chunks {
 		putChunk(chunk)
 	}
@@ -397,7 +399,7 @@ func (b *bucket) Load(r io.Reader, maxChunks uint64) error {
 	b.m = m
 	b.idx = bIdx
 	b.gen = bGen
-	b.mu.Unlock()
+	optiLock1.WUnlock(&b.mu)
 
 	return nil
 }

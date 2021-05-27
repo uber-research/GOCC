@@ -1,0 +1,163 @@
+diff --git a/tools/gocc/testdata/src/github.com/VictoriaMetrics/fastcache/fastcache.go b/tools/gocc/testdata/src/github.com/VictoriaMetrics/fastcache/fastcache.go
+index 20a3c02..2355a47 100644
+--- a/tools/gocc/testdata/src/github.com/VictoriaMetrics/fastcache/fastcache.go
++++ b/tools/gocc/testdata/src/github.com/VictoriaMetrics/fastcache/fastcache.go
+@@ -5,6 +5,7 @@ package fastcache
+ 
+ import (
+ 	"fmt"
++	rtm "github.com/uber-research/GOCC/tools/gocc/rtmlib"
+ 	"sync"
+ 	"sync/atomic"
+ 
+@@ -248,7 +249,8 @@ func (b *bucket) Init(maxBytes uint64) {
+ }
+ 
+ func (b *bucket) Reset() {
+-	b.mu.Lock()
++	optiLock1 := rtm.OptiLock{}
++	optiLock1.WLock(&b.mu)
+ 	chunks := b.chunks
+ 	for i := range chunks {
+ 		putChunk(chunks[i])
+@@ -265,11 +267,12 @@ func (b *bucket) Reset() {
+ 	atomic.StoreUint64(&b.misses, 0)
+ 	atomic.StoreUint64(&b.collisions, 0)
+ 	atomic.StoreUint64(&b.corruptions, 0)
+-	b.mu.Unlock()
++	optiLock1.WUnlock(&b.mu)
+ }
+ 
+ func (b *bucket) Clean() {
+-	b.mu.Lock()
++	optiLock1 := rtm.OptiLock{}
++	optiLock1.WLock(&b.mu)
+ 	bGen := b.gen & ((1 << genSizeBits) - 1)
+ 	bIdx := b.idx
+ 	bm := b.m
+@@ -281,22 +284,23 @@ func (b *bucket) Clean() {
+ 		}
+ 		delete(bm, k)
+ 	}
+-	b.mu.Unlock()
++	optiLock1.WUnlock(&b.mu)
+ }
+ 
+ func (b *bucket) UpdateStats(s *Stats) {
++	optiLock1 := rtm.OptiLock{}
+ 	s.GetCalls += atomic.LoadUint64(&b.getCalls)
+ 	s.SetCalls += atomic.LoadUint64(&b.setCalls)
+ 	s.Misses += atomic.LoadUint64(&b.misses)
+ 	s.Collisions += atomic.LoadUint64(&b.collisions)
+ 	s.Corruptions += atomic.LoadUint64(&b.corruptions)
+ 
+-	b.mu.RLock()
++	optiLock1.RLock(&b.mu)
+ 	s.EntriesCount += uint64(len(b.m))
+ 	for _, chunk := range b.chunks {
+ 		s.BytesSize += uint64(cap(chunk))
+ 	}
+-	b.mu.RUnlock()
++	optiLock1.RUnlock(&b.mu)
+ }
+ 
+ func (b *bucket) Set(k, v []byte, h uint64) {
+@@ -358,9 +362,10 @@ func (b *bucket) Set(k, v []byte, h uint64) {
+ }
+ 
+ func (b *bucket) Get(dst, k []byte, h uint64, returnDst bool) ([]byte, bool) {
++	optiLock1 := rtm.OptiLock{}
+ 	atomic.AddUint64(&b.getCalls, 1)
+ 	found := false
+-	b.mu.RLock()
++	optiLock1.RLock(&b.mu)
+ 	v := b.m[h]
+ 	bGen := b.gen & ((1 << genSizeBits) - 1)
+ 	if v > 0 {
+@@ -401,7 +406,7 @@ func (b *bucket) Get(dst, k []byte, h uint64, returnDst bool) ([]byte, bool) {
+ 		}
+ 	}
+ end:
+-	b.mu.RUnlock()
++	optiLock1.RUnlock(&b.mu)
+ 	if !found {
+ 		atomic.AddUint64(&b.misses, 1)
+ 	}
+@@ -409,7 +414,8 @@ end:
+ }
+ 
+ func (b *bucket) Del(h uint64) {
+-	b.mu.Lock()
++	optiLock1 := rtm.OptiLock{}
++	optiLock1.WLock(&b.mu)
+ 	delete(b.m, h)
+-	b.mu.Unlock()
++	optiLock1.WUnlock(&b.mu)
+ }
+diff --git a/tools/gocc/testdata/src/github.com/VictoriaMetrics/fastcache/file.go b/tools/gocc/testdata/src/github.com/VictoriaMetrics/fastcache/file.go
+index bab5484..f0a9110 100644
+--- a/tools/gocc/testdata/src/github.com/VictoriaMetrics/fastcache/file.go
++++ b/tools/gocc/testdata/src/github.com/VictoriaMetrics/fastcache/file.go
+@@ -3,6 +3,7 @@ package fastcache
+ import (
+ 	"encoding/binary"
+ 	"fmt"
++	rtm "github.com/uber-research/GOCC/tools/gocc/rtmlib"
+ 	"io"
+ 	"io/ioutil"
+ 	"os"
+@@ -325,6 +326,7 @@ func (b *bucket) Save(w io.Writer) error {
+ }
+ 
+ func (b *bucket) Load(r io.Reader, maxChunks uint64) error {
++	optiLock1 := rtm.OptiLock{}
+ 	if maxChunks == 0 {
+ 		return fmt.Errorf("the number of chunks per bucket cannot be zero")
+ 	}
+@@ -389,7 +391,7 @@ func (b *bucket) Load(r io.Reader, maxChunks uint64) error {
+ 		chunks[currChunkIdx] = chunks[currChunkIdx][:chunkLen]
+ 	}
+ 
+-	b.mu.Lock()
++	optiLock1.WLock(&b.mu)
+ 	for _, chunk := range b.chunks {
+ 		putChunk(chunk)
+ 	}
+@@ -397,7 +399,7 @@ func (b *bucket) Load(r io.Reader, maxChunks uint64) error {
+ 	b.m = m
+ 	b.idx = bIdx
+ 	b.gen = bGen
+-	b.mu.Unlock()
++	optiLock1.WUnlock(&b.mu)
+ 
+ 	return nil
+ }
+diff --git a/tools/gocc/testdata/src/github.com/VictoriaMetrics/fastcache/malloc_mmap.go b/tools/gocc/testdata/src/github.com/VictoriaMetrics/fastcache/malloc_mmap.go
+index 424b79b..bfec67d 100644
+--- a/tools/gocc/testdata/src/github.com/VictoriaMetrics/fastcache/malloc_mmap.go
++++ b/tools/gocc/testdata/src/github.com/VictoriaMetrics/fastcache/malloc_mmap.go
+@@ -4,6 +4,7 @@ package fastcache
+ 
+ import (
+ 	"fmt"
++	rtm "github.com/uber-research/GOCC/tools/gocc/rtmlib"
+ 	"sync"
+ 	"syscall"
+ 	"unsafe"
+@@ -40,13 +41,14 @@ func getChunk() []byte {
+ }
+ 
+ func putChunk(chunk []byte) {
++	optiLock1 := rtm.OptiLock{}
+ 	if chunk == nil {
+ 		return
+ 	}
+ 	chunk = chunk[:chunkSize]
+ 	p := (*[chunkSize]byte)(unsafe.Pointer(&chunk[0]))
+ 
+-	freeChunksLock.Lock()
++	optiLock1.Lock(&freeChunksLock)
+ 	freeChunks = append(freeChunks, p)
+-	freeChunksLock.Unlock()
++	optiLock1.Unlock(&freeChunksLock)
+ }
