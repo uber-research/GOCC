@@ -5,7 +5,6 @@ package fastcache
 
 import (
 	"fmt"
-	rtm "github.com/uber-research/GOCC/tools/gocc/rtmlib"
 	"sync"
 	"sync/atomic"
 
@@ -249,8 +248,7 @@ func (b *bucket) Init(maxBytes uint64) {
 }
 
 func (b *bucket) Reset() {
-	optiLock1 := rtm.OptiLock{}
-	optiLock1.WLock(&b.mu)
+	b.mu.Lock()
 	chunks := b.chunks
 	for i := range chunks {
 		putChunk(chunks[i])
@@ -267,12 +265,11 @@ func (b *bucket) Reset() {
 	atomic.StoreUint64(&b.misses, 0)
 	atomic.StoreUint64(&b.collisions, 0)
 	atomic.StoreUint64(&b.corruptions, 0)
-	optiLock1.WUnlock(&b.mu)
+	b.mu.Unlock()
 }
 
 func (b *bucket) Clean() {
-	optiLock1 := rtm.OptiLock{}
-	optiLock1.WLock(&b.mu)
+	b.mu.Lock()
 	bGen := b.gen & ((1 << genSizeBits) - 1)
 	bIdx := b.idx
 	bm := b.m
@@ -284,23 +281,22 @@ func (b *bucket) Clean() {
 		}
 		delete(bm, k)
 	}
-	optiLock1.WUnlock(&b.mu)
+	b.mu.Unlock()
 }
 
 func (b *bucket) UpdateStats(s *Stats) {
-	optiLock1 := rtm.OptiLock{}
 	s.GetCalls += atomic.LoadUint64(&b.getCalls)
 	s.SetCalls += atomic.LoadUint64(&b.setCalls)
 	s.Misses += atomic.LoadUint64(&b.misses)
 	s.Collisions += atomic.LoadUint64(&b.collisions)
 	s.Corruptions += atomic.LoadUint64(&b.corruptions)
 
-	optiLock1.RLock(&b.mu)
+	b.mu.RLock()
 	s.EntriesCount += uint64(len(b.m))
 	for _, chunk := range b.chunks {
 		s.BytesSize += uint64(cap(chunk))
 	}
-	optiLock1.RUnlock(&b.mu)
+	b.mu.RUnlock()
 }
 
 func (b *bucket) Set(k, v []byte, h uint64) {
@@ -362,10 +358,9 @@ func (b *bucket) Set(k, v []byte, h uint64) {
 }
 
 func (b *bucket) Get(dst, k []byte, h uint64, returnDst bool) ([]byte, bool) {
-	optiLock1 := rtm.OptiLock{}
 	atomic.AddUint64(&b.getCalls, 1)
 	found := false
-	optiLock1.RLock(&b.mu)
+	b.mu.RLock()
 	v := b.m[h]
 	bGen := b.gen & ((1 << genSizeBits) - 1)
 	if v > 0 {
@@ -406,7 +401,7 @@ func (b *bucket) Get(dst, k []byte, h uint64, returnDst bool) ([]byte, bool) {
 		}
 	}
 end:
-	optiLock1.RUnlock(&b.mu)
+	b.mu.RUnlock()
 	if !found {
 		atomic.AddUint64(&b.misses, 1)
 	}
@@ -414,8 +409,7 @@ end:
 }
 
 func (b *bucket) Del(h uint64) {
-	optiLock1 := rtm.OptiLock{}
-	optiLock1.WLock(&b.mu)
+	b.mu.Lock()
 	delete(b.m, h)
-	optiLock1.WUnlock(&b.mu)
+	b.mu.Unlock()
 }

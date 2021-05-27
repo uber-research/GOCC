@@ -4,7 +4,6 @@ package fastcache
 
 import (
 	"fmt"
-	rtm "github.com/uber-research/GOCC/tools/gocc/rtmlib"
 	"sync"
 	"syscall"
 	"unsafe"
@@ -41,14 +40,13 @@ func getChunk() []byte {
 }
 
 func putChunk(chunk []byte) {
-	optiLock1 := rtm.OptiLock{}
 	if chunk == nil {
 		return
 	}
 	chunk = chunk[:chunkSize]
 	p := (*[chunkSize]byte)(unsafe.Pointer(&chunk[0]))
 
-	optiLock1.Lock(&freeChunksLock)
+	freeChunksLock.Lock()
 	freeChunks = append(freeChunks, p)
-	optiLock1.Unlock(&freeChunksLock)
+	freeChunksLock.Unlock()
 }
