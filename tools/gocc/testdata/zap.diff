@@ -1,0 +1,160 @@
+diff --git a/tools/gocc/testdata/src/go.uber.org/zap/global.go b/tools/gocc/testdata/src/go.uber.org/zap/global.go
+index c1ac050..c2f4403 100644
+--- a/tools/gocc/testdata/src/go.uber.org/zap/global.go
++++ b/tools/gocc/testdata/src/go.uber.org/zap/global.go
+@@ -23,6 +23,7 @@ package zap
+ import (
+ 	"bytes"
+ 	"fmt"
++	rtm "github.com/uber-research/GOCC/tools/gocc/rtmlib"
+ 	"log"
+ 	"os"
+ 	"sync"
+@@ -45,29 +46,32 @@ var (
+ // L returns the global Logger, which can be reconfigured with ReplaceGlobals.
+ // It's safe for concurrent use.
+ func L() *Logger {
+-	_globalMu.RLock()
++	optiLock1 := rtm.OptiLock{}
++	optiLock1.RLock(&_globalMu)
+ 	l := _globalL
+-	_globalMu.RUnlock()
++	optiLock1.RUnlock(&_globalMu)
+ 	return l
+ }
+ 
+ // S returns the global SugaredLogger, which can be reconfigured with
+ // ReplaceGlobals. It's safe for concurrent use.
+ func S() *SugaredLogger {
+-	_globalMu.RLock()
++	optiLock1 := rtm.OptiLock{}
++	optiLock1.RLock(&_globalMu)
+ 	s := _globalS
+-	_globalMu.RUnlock()
++	optiLock1.RUnlock(&_globalMu)
+ 	return s
+ }
+ 
+ // ReplaceGlobals replaces the global Logger and SugaredLogger, and returns a
+ // function to restore the original values. It's safe for concurrent use.
+ func ReplaceGlobals(logger *Logger) func() {
+-	_globalMu.Lock()
++	optiLock1 := rtm.OptiLock{}
++	optiLock1.WLock(&_globalMu)
+ 	prev := _globalL
+ 	_globalL = logger
+ 	_globalS = logger.Sugar()
+-	_globalMu.Unlock()
++	optiLock1.WUnlock(&_globalMu)
+ 	return func() { ReplaceGlobals(prev) }
+ }
+ 
+diff --git a/tools/gocc/testdata/src/go.uber.org/zap/sink.go b/tools/gocc/testdata/src/go.uber.org/zap/sink.go
+index df46fa8..ba38b1c 100644
+--- a/tools/gocc/testdata/src/go.uber.org/zap/sink.go
++++ b/tools/gocc/testdata/src/go.uber.org/zap/sink.go
+@@ -23,6 +23,7 @@ package zap
+ import (
+ 	"errors"
+ 	"fmt"
++	rtm "github.com/uber-research/GOCC/tools/gocc/rtmlib"
+ 	"io"
+ 	"net/url"
+ 	"os"
+@@ -44,8 +45,9 @@ func init() {
+ }
+ 
+ func resetSinkRegistry() {
+-	_sinkMutex.Lock()
+-	defer _sinkMutex.Unlock()
++	optiLock1 := rtm.OptiLock{}
++	optiLock1.WLock(&_sinkMutex)
++	defer optiLock1.WUnlock(&_sinkMutex)
+ 
+ 	_sinkFactories = map[string]func(*url.URL) (Sink, error){
+ 		schemeFile: newFileSink,
+@@ -96,6 +98,7 @@ func RegisterSink(scheme string, factory func(*url.URL) (Sink, error)) error {
+ }
+ 
+ func newSink(rawURL string) (Sink, error) {
++	optiLock1 := rtm.OptiLock{}
+ 	u, err := url.Parse(rawURL)
+ 	if err != nil {
+ 		return nil, fmt.Errorf("can't parse %q as a URL: %v", rawURL, err)
+@@ -104,9 +107,9 @@ func newSink(rawURL string) (Sink, error) {
+ 		u.Scheme = schemeFile
+ 	}
+ 
+-	_sinkMutex.RLock()
++	optiLock1.RLock(&_sinkMutex)
+ 	factory, ok := _sinkFactories[u.Scheme]
+-	_sinkMutex.RUnlock()
++	optiLock1.RUnlock(&_sinkMutex)
+ 	if !ok {
+ 		return nil, &errSinkNotFound{u.Scheme}
+ 	}
+diff --git a/tools/gocc/testdata/src/go.uber.org/zap/zaptest/observer/observer.go b/tools/gocc/testdata/src/go.uber.org/zap/zaptest/observer/observer.go
+index 78f5be4..a9f2197 100644
+--- a/tools/gocc/testdata/src/go.uber.org/zap/zaptest/observer/observer.go
++++ b/tools/gocc/testdata/src/go.uber.org/zap/zaptest/observer/observer.go
+@@ -25,6 +25,7 @@
+ package observer // import "go.uber.org/zap/zaptest/observer"
+ 
+ import (
++	rtm "github.com/uber-research/GOCC/tools/gocc/rtmlib"
+ 	"strings"
+ 	"sync"
+ 	"time"
+@@ -40,30 +41,33 @@ type ObservedLogs struct {
+ 
+ // Len returns the number of items in the collection.
+ func (o *ObservedLogs) Len() int {
+-	o.mu.RLock()
++	optiLock1 := rtm.OptiLock{}
++	optiLock1.RLock(&o.mu)
+ 	n := len(o.logs)
+-	o.mu.RUnlock()
++	optiLock1.RUnlock(&o.mu)
+ 	return n
+ }
+ 
+ // All returns a copy of all the observed logs.
+ func (o *ObservedLogs) All() []LoggedEntry {
+-	o.mu.RLock()
++	optiLock1 := rtm.OptiLock{}
++	optiLock1.RLock(&o.mu)
+ 	ret := make([]LoggedEntry, len(o.logs))
+ 	for i := range o.logs {
+ 		ret[i] = o.logs[i]
+ 	}
+-	o.mu.RUnlock()
++	optiLock1.RUnlock(&o.mu)
+ 	return ret
+ }
+ 
+ // TakeAll returns a copy of all the observed logs, and truncates the observed
+ // slice.
+ func (o *ObservedLogs) TakeAll() []LoggedEntry {
+-	o.mu.Lock()
++	optiLock1 := rtm.OptiLock{}
++	optiLock1.WLock(&o.mu)
+ 	ret := o.logs
+ 	o.logs = nil
+-	o.mu.Unlock()
++	optiLock1.WUnlock(&o.mu)
+ 	return ret
+ }
+ 
+@@ -118,9 +122,10 @@ func (o *ObservedLogs) filter(match func(LoggedEntry) bool) *ObservedLogs {
+ }
+ 
+ func (o *ObservedLogs) add(log LoggedEntry) {
+-	o.mu.Lock()
++	optiLock1 := rtm.OptiLock{}
++	optiLock1.WLock(&o.mu)
+ 	o.logs = append(o.logs, log)
+-	o.mu.Unlock()
++	optiLock1.WUnlock(&o.mu)
+ }
+ 
+ // New creates a new Core that buffers logs in memory (without any encoding).
