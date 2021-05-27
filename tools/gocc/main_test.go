@@ -32,19 +32,19 @@ func TestPkgs(t *testing.T) {
 		// 	diffFile: "testdata/tally.diff",
 		// },
 
-		// {
-		// 	loc:      "./testdata/src/github.com/uber-go/zap",
-		// 	name:     "zap",
-		// 	rev:      "5b4722d3797ca2e22f3c16dbe71a97b9c7783c98",
-		// 	diffFile: "testdata/zap.diff",
-		// },
-
 		{
-			loc:      "./testdata/src/github.com/VictoriaMetrics/fastcache",
-			name:     "fastcache",
+			loc:      "./testdata/src/github.com/uber-go/zap",
+			name:     "zap",
 			rev:      "5b4722d3797ca2e22f3c16dbe71a97b9c7783c98",
-			diffFile: "testdata/fastcache.diff",
+			diffFile: "testdata/zap.diff",
 		},
+
+		// {
+		// 	loc:      "./testdata/src/github.com/VictoriaMetrics/fastcache",
+		// 	name:     "fastcache",
+		// 	rev:      "5b4722d3797ca2e22f3c16dbe71a97b9c7783c98",
+		// 	diffFile: "testdata/fastcache.diff",
+		// },
 	}
 
 	var replaceRegex = regexp.MustCompile(`(?s)\nindex(.*?)\n`)
