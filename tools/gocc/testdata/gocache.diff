@@ -1,0 +1,306 @@
+diff --git a/tools/gocc/testdata/src/github.com/patrickmn/go-cache/cache.go b/tools/gocc/testdata/src/github.com/patrickmn/go-cache/cache.go
+index db88d2f..e27bf3f 100644
+--- a/tools/gocc/testdata/src/github.com/patrickmn/go-cache/cache.go
++++ b/tools/gocc/testdata/src/github.com/patrickmn/go-cache/cache.go
+@@ -3,6 +3,7 @@ package cache
+ import (
+ 	"encoding/gob"
+ 	"fmt"
++	rtm "github.com/uber-research/GOCC/tools/gocc/rtmlib"
+ 	"io"
+ 	"os"
+ 	"runtime"
+@@ -49,6 +50,7 @@ type cache struct {
+ // (DefaultExpiration), the cache's default expiration time is used. If it is -1
+ // (NoExpiration), the item never expires.
+ func (c *cache) Set(k string, x interface{}, d time.Duration) {
++	optiLock1 := rtm.OptiLock{}
+ 	// "Inlining" of set
+ 	var e int64
+ 	if d == DefaultExpiration {
+@@ -57,14 +59,14 @@ func (c *cache) Set(k string, x interface{}, d time.Duration) {
+ 	if d > 0 {
+ 		e = time.Now().Add(d).UnixNano()
+ 	}
+-	c.mu.Lock()
++	optiLock1.WLock(&c.mu)
+ 	c.items[k] = Item{
+ 		Object:     x,
+ 		Expiration: e,
+ 	}
+ 	// TODO: Calls to mu.Unlock are currently not deferred because defer
+ 	// adds ~200 ns (as of go1.)
+-	c.mu.Unlock()
++	optiLock1.WUnlock(&c.mu)
+ }
+ 
+ func (c *cache) set(k string, x interface{}, d time.Duration) {
+@@ -903,9 +905,10 @@ func (c *cache) DecrementFloat64(k string, n float64) (float64, error) {
+ 
+ // Delete an item from the cache. Does nothing if the key is not in the cache.
+ func (c *cache) Delete(k string) {
+-	c.mu.Lock()
++	optiLock1 := rtm.OptiLock{}
++	optiLock1.WLock(&c.mu)
+ 	v, evicted := c.delete(k)
+-	c.mu.Unlock()
++	optiLock1.WUnlock(&c.mu)
+ 	if evicted {
+ 		c.onEvicted(k, v)
+ 	}
+@@ -929,9 +932,10 @@ type keyAndValue struct {
+ 
+ // Delete all expired items from the cache.
+ func (c *cache) DeleteExpired() {
++	optiLock1 := rtm.OptiLock{}
+ 	var evictedItems []keyAndValue
+ 	now := time.Now().UnixNano()
+-	c.mu.Lock()
++	optiLock1.WLock(&c.mu)
+ 	for k, v := range c.items {
+ 		// "Inlining" of expired
+ 		if v.Expiration > 0 && now > v.Expiration {
+@@ -941,7 +945,7 @@ func (c *cache) DeleteExpired() {
+ 			}
+ 		}
+ 	}
+-	c.mu.Unlock()
++	optiLock1.WUnlock(&c.mu)
+ 	for _, v := range evictedItems {
+ 		c.onEvicted(v.key, v.value)
+ 	}
+@@ -951,9 +955,10 @@ func (c *cache) DeleteExpired() {
+ // item is evicted from the cache. (Including when it is deleted manually, but
+ // not when it is overwritten.) Set to nil to disable.
+ func (c *cache) OnEvicted(f func(string, interface{})) {
+-	c.mu.Lock()
++	optiLock1 := rtm.OptiLock{}
++	optiLock1.WLock(&c.mu)
+ 	c.onEvicted = f
+-	c.mu.Unlock()
++	optiLock1.WUnlock(&c.mu)
+ }
+ 
+ // Write the cache's items (using Gob) to an io.Writer.
+@@ -1000,12 +1005,13 @@ func (c *cache) SaveFile(fname string) error {
+ // NOTE: This method is deprecated in favor of c.Items() and NewFrom() (see the
+ // documentation for NewFrom().)
+ func (c *cache) Load(r io.Reader) error {
++	optiLock1 := rtm.OptiLock{}
+ 	dec := gob.NewDecoder(r)
+ 	items := map[string]Item{}
+ 	err := dec.Decode(&items)
+ 	if err == nil {
+-		c.mu.Lock()
+-		defer c.mu.Unlock()
++		optiLock1.WLock(&c.mu)
++		defer optiLock1.WUnlock(&c.mu)
+ 		for k, v := range items {
+ 			ov, found := c.items[k]
+ 			if !found || ov.Expired() {
+@@ -1036,8 +1042,9 @@ func (c *cache) LoadFile(fname string) error {
+ 
+ // Copies all unexpired items in the cache into a new map and returns it.
+ func (c *cache) Items() map[string]Item {
+-	c.mu.RLock()
+-	defer c.mu.RUnlock()
++	optiLock1 := rtm.OptiLock{}
++	optiLock1.RLock(&c.mu)
++	defer optiLock1.RUnlock(&c.mu)
+ 	m := make(map[string]Item, len(c.items))
+ 	now := time.Now().UnixNano()
+ 	for k, v := range c.items {
+@@ -1055,17 +1062,19 @@ func (c *cache) Items() map[string]Item {
+ // Returns the number of items in the cache. This may include items that have
+ // expired, but have not yet been cleaned up.
+ func (c *cache) ItemCount() int {
+-	c.mu.RLock()
++	optiLock1 := rtm.OptiLock{}
++	optiLock1.RLock(&c.mu)
+ 	n := len(c.items)
+-	c.mu.RUnlock()
++	optiLock1.RUnlock(&c.mu)
+ 	return n
+ }
+ 
+ // Delete all items from the cache.
+ func (c *cache) Flush() {
+-	c.mu.Lock()
++	optiLock1 := rtm.OptiLock{}
++	optiLock1.WLock(&c.mu)
+ 	c.items = map[string]Item{}
+-	c.mu.Unlock()
++	optiLock1.WUnlock(&c.mu)
+ }
+ 
+ type janitor struct {
+diff --git a/tools/gocc/testdata/src/github.com/patrickmn/go-cache/cache_test.go b/tools/gocc/testdata/src/github.com/patrickmn/go-cache/cache_test.go
+index de3e9d6..5febdf8 100644
+--- a/tools/gocc/testdata/src/github.com/patrickmn/go-cache/cache_test.go
++++ b/tools/gocc/testdata/src/github.com/patrickmn/go-cache/cache_test.go
+@@ -2,6 +2,7 @@ package cache
+ 
+ import (
+ 	"bytes"
++	rtm "github.com/uber-research/GOCC/tools/gocc/rtmlib"
+ 	"io/ioutil"
+ 	"runtime"
+ 	"strconv"
+@@ -1444,6 +1445,7 @@ func benchmarkCacheGet(b *testing.B, exp time.Duration) {
+ }
+ 
+ func BenchmarkRWMutexMapGet(b *testing.B) {
++	optiLock1 := rtm.OptiLock{}
+ 	b.StopTimer()
+ 	m := map[string]string{
+ 		"foo": "bar",
+@@ -1451,13 +1453,14 @@ func BenchmarkRWMutexMapGet(b *testing.B) {
+ 	mu := sync.RWMutex{}
+ 	b.StartTimer()
+ 	for i := 0; i < b.N; i++ {
+-		mu.RLock()
++		optiLock1.RLock(&mu)
+ 		_, _ = m["foo"]
+-		mu.RUnlock()
++		optiLock1.RUnlock(&mu)
+ 	}
+ }
+ 
+ func BenchmarkRWMutexInterfaceMapGetStruct(b *testing.B) {
++	optiLock1 := rtm.OptiLock{}
+ 	b.StopTimer()
+ 	s := struct{ name string }{name: "foo"}
+ 	m := map[interface{}]string{
+@@ -1466,13 +1469,14 @@ func BenchmarkRWMutexInterfaceMapGetStruct(b *testing.B) {
+ 	mu := sync.RWMutex{}
+ 	b.StartTimer()
+ 	for i := 0; i < b.N; i++ {
+-		mu.RLock()
++		optiLock1.RLock(&mu)
+ 		_, _ = m[s]
+-		mu.RUnlock()
++		optiLock1.RUnlock(&mu)
+ 	}
+ }
+ 
+ func BenchmarkRWMutexInterfaceMapGetString(b *testing.B) {
++	optiLock1 := rtm.OptiLock{}
+ 	b.StopTimer()
+ 	m := map[interface{}]string{
+ 		"foo": "bar",
+@@ -1480,9 +1484,9 @@ func BenchmarkRWMutexInterfaceMapGetString(b *testing.B) {
+ 	mu := sync.RWMutex{}
+ 	b.StartTimer()
+ 	for i := 0; i < b.N; i++ {
+-		mu.RLock()
++		optiLock1.RLock(&mu)
+ 		_, _ = m["foo"]
+-		mu.RUnlock()
++		optiLock1.RUnlock(&mu)
+ 	}
+ }
+ 
+@@ -1527,10 +1531,11 @@ func BenchmarkRWMutexMapGetConcurrent(b *testing.B) {
+ 	b.StartTimer()
+ 	for i := 0; i < workers; i++ {
+ 		go func() {
++			optiLock1 := rtm.OptiLock{}
+ 			for j := 0; j < each; j++ {
+-				mu.RLock()
++				optiLock1.RLock(&mu)
+ 				_, _ = m["foo"]
+-				mu.RUnlock()
++				optiLock1.RUnlock(&mu)
+ 			}
+ 			wg.Done()
+ 		}()
+@@ -1592,14 +1597,15 @@ func benchmarkCacheSet(b *testing.B, exp time.Duration) {
+ }
+ 
+ func BenchmarkRWMutexMapSet(b *testing.B) {
++	optiLock1 := rtm.OptiLock{}
+ 	b.StopTimer()
+ 	m := map[string]string{}
+ 	mu := sync.RWMutex{}
+ 	b.StartTimer()
+ 	for i := 0; i < b.N; i++ {
+-		mu.Lock()
++		optiLock1.WLock(&mu)
+ 		m["foo"] = "bar"
+-		mu.Unlock()
++		optiLock1.WUnlock(&mu)
+ 	}
+ }
+ 
+@@ -1614,42 +1620,46 @@ func BenchmarkCacheSetDelete(b *testing.B) {
+ }
+ 
+ func BenchmarkRWMutexMapSetDelete(b *testing.B) {
++	optiLock2 := rtm.OptiLock{}
++	optiLock1 := rtm.OptiLock{}
+ 	b.StopTimer()
+ 	m := map[string]string{}
+ 	mu := sync.RWMutex{}
+ 	b.StartTimer()
+ 	for i := 0; i < b.N; i++ {
+-		mu.Lock()
++		optiLock2.WLock(&mu)
+ 		m["foo"] = "bar"
+-		mu.Unlock()
+-		mu.Lock()
++		optiLock2.WUnlock(&mu)
++		optiLock1.WLock(&mu)
+ 		delete(m, "foo")
+-		mu.Unlock()
++		optiLock1.WUnlock(&mu)
+ 	}
+ }
+ 
+ func BenchmarkCacheSetDeleteSingleLock(b *testing.B) {
++	optiLock1 := rtm.OptiLock{}
+ 	b.StopTimer()
+ 	tc := New(DefaultExpiration, 0)
+ 	b.StartTimer()
+ 	for i := 0; i < b.N; i++ {
+-		tc.mu.Lock()
++		optiLock1.WLock(&tc.mu)
+ 		tc.set("foo", "bar", DefaultExpiration)
+ 		tc.delete("foo")
+-		tc.mu.Unlock()
++		optiLock1.WUnlock(&tc.mu)
+ 	}
+ }
+ 
+ func BenchmarkRWMutexMapSetDeleteSingleLock(b *testing.B) {
++	optiLock1 := rtm.OptiLock{}
+ 	b.StopTimer()
+ 	m := map[string]string{}
+ 	mu := sync.RWMutex{}
+ 	b.StartTimer()
+ 	for i := 0; i < b.N; i++ {
+-		mu.Lock()
++		optiLock1.WLock(&mu)
+ 		m["foo"] = "bar"
+ 		delete(m, "foo")
+-		mu.Unlock()
++		optiLock1.WUnlock(&mu)
+ 	}
+ }
+ 
+@@ -1664,13 +1674,14 @@ func BenchmarkIncrementInt(b *testing.B) {
+ }
+ 
+ func BenchmarkDeleteExpiredLoop(b *testing.B) {
++	optiLock1 := rtm.OptiLock{}
+ 	b.StopTimer()
+ 	tc := New(5*time.Minute, 0)
+-	tc.mu.Lock()
++	optiLock1.WLock(&tc.mu)
+ 	for i := 0; i < 100000; i++ {
+ 		tc.set(strconv.Itoa(i), "bar", DefaultExpiration)
+ 	}
+-	tc.mu.Unlock()
++	optiLock1.WUnlock(&tc.mu)
+ 	b.StartTimer()
+ 	for i := 0; i < b.N; i++ {
+ 		tc.DeleteExpired()

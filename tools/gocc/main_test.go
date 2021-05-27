@@ -34,12 +34,12 @@ func TestPkgs(t *testing.T) {
 			rewriteTest: false,
 		},
 
-		// // {
-		// // 	loc:      "./testdata/src/go.uber.org/zap",
-		// // 	name:     "zap",
-		// // 	rev:      "5b4722d3797ca2e22f3c16dbe71a97b9c7783c98",
-		// // 	diffFile: "testdata/zap.diff",
-		// // },
+		{
+			loc:      "./testdata/src/go.uber.org/zap",
+			name:     "zap",
+			rev:      "5b4722d3797ca2e22f3c16dbe71a97b9c7783c98",
+			diffFile: "testdata/zap.diff",
+		},
 
 		{
 			loc:         "./testdata/src/github.com/patrickmn/go-cache/",
@@ -61,7 +61,7 @@ func TestPkgs(t *testing.T) {
 	var replaceRegex = regexp.MustCompile(`(?s)\nindex(.*?)\n`)
 
 	for _, tc := range tt {
-		_ = tc
+		tc := tc
 		defer func() {
 			cmd := []string{"git", "checkout", "--", tc.loc}
 			exec.Command(cmd[0], cmd[1:]...).Output()

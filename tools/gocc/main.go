@@ -272,6 +272,7 @@ func (g *gocc) isSameLock(lockVal, unlockVal ssa.Value) bool {
 const _tally = "/Users/milind//gocode/src/github.com/uber-go/tally/"
 const _gocache = "/Users/milind/gocode/src/github.com/patrickmn/go-cache/"
 const _fastcache = "/Users/milind/gocode/src/github.com/VictoriaMetrics/fastcache"
+const _zap = "/Users/milind/gocode/src/go.uber.org/zap/"
 
 func dumpMetrics(s map[*ssa.Function]*functionSummary) {
 	var totalMetric metrics
@@ -530,7 +531,7 @@ func main() {
 
 	var inputFile string
 	//	flag.StringVar(&inputFile, "input", "testdata/test26.go", "source file to analyze")
-	flag.StringVar(&inputFile, "input", _fastcache, "source file to analyze")
+	flag.StringVar(&inputFile, "input", _zap, "source file to analyze")
 
 	var profilePath string
 	flag.StringVar(&profilePath, "profile", "", "profiling of hot function")
