@@ -29,8 +29,6 @@ import (
 // TODO: manual SSA to detect a unique name for the majic lock
 const _optiLockName = "optiLock"
 
-var majicLockID = 0
-
 // for any lock, lockInfo stores the positions where it locks and (defer) unlocks
 // isValue indicates whether this lock is lock object or pointer in source code
 type lockInfo struct {
@@ -170,7 +168,7 @@ func isMutexValue(s string) bool {
 
 // Go allows both value and object to call lock function
 // therefore, we need to differentiate two types for code transformation
-func isLockPointer(rcv ssa.Value) bool {
+func isSSAValueAMutexPointer(rcv ssa.Value) bool {
 	isValue := false
 	switch rcv.(type) {
 	case *ssa.FieldAddr:
@@ -382,9 +380,9 @@ func (g *gocc) Process() {
 			r:       r,
 			w:       w,
 		}
-		if node.Pkg.Pkg.Name() == "cache" {
-			fmt.Printf("pkg = %s, func = %v, m=%d, r = %d, w = %d\n", node.Pkg.Pkg.Name(), node.Name(), len(m.d)+len(m.l)+len(m.u), len(r.d)+len(r.l)+len(r.u), len(w.d)+len(w.l)+len(w.u))
-		}
+		// if node.Pkg.Pkg.Name() == "cache" {
+		// 	fmt.Printf("pkg = %s, func = %v, m=%d, r = %d, w = %d\n", node.Pkg.Pkg.Name(), node.Name(), len(m.d)+len(m.l)+len(m.u), len(r.d)+len(r.l)+len(r.u), len(w.d)+len(w.l)+len(w.u))
+		// }
 		totW += len(w.d) + len(w.l) + len(w.u)
 		for k, v := range ptToIns {
 			globalLUPoints[k] = v

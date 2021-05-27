@@ -742,8 +742,8 @@ func collectLUPairs(f *ssa.Function, funcSummaryMap map[*ssa.Function]*functionS
 			}
 			// both ought to be pointers or both values.
 			// TODO: This is a strict condition, we can allow some freedom if needed.
-			lup.l.isPointer = isLockPointer(lup.l.callC.Args[0])
-			lup.u.isPointer = isLockPointer(lup.u.callC.Args[0])
+			lup.l.isPointer = isSSAValueAMutexPointer(lup.l.callC.Args[0])
+			lup.u.isPointer = isSSAValueAMutexPointer(lup.u.callC.Args[0])
 
 			if lup.l.isPointer != lup.u.isPointer {
 				continue
