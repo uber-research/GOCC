@@ -37,16 +37,16 @@ const (
 const _intMax = int(^uint(0) >> 1)
 
 type luPoint struct {
-	astPath   []ast.Node
-	i         ssa.Instruction
-	callC     ssa.CallCommon
-	idx       int
-	ptr       pointer.Pointer
-	kind      luPointType
-	mutexVal  ssa.Value
-	isPointer bool
-	id        int
-	isLambda  bool
+	astPath     []ast.Node
+	ssaIns      ssa.Instruction
+	callC       ssa.CallCommon
+	insIdx      int
+	pointerInfo pointer.Pointer
+	kind        luPointType
+	mutexVal    ssa.Value
+	isPointer   bool
+	idInFunc    int
+	isLambda    bool
 }
 
 type luPair struct {
@@ -241,7 +241,7 @@ func (l *luPoint) luType() luPointType {
 }
 
 func (l *luPoint) ins() ssa.Instruction {
-	return l.i
+	return l.ssaIns
 }
 
 func (l *luPoint) pos() token.Pos {
@@ -257,11 +257,11 @@ func (p *luPoint) mutexValue() ssa.Value {
 }
 
 func (l *luPoint) pointsToSet() pointer.PointsToSet {
-	return l.ptr.PointsTo()
+	return l.pointerInfo.PointsTo()
 }
 
 func (l *luPoint) setAliasingPointer(p pointer.Pointer) {
-	l.ptr = p
+	l.pointerInfo = p
 }
 
 func (l *luPoint) call() ssa.CallCommon {
@@ -269,8 +269,8 @@ func (l *luPoint) call() ssa.CallCommon {
 }
 
 func (l *luPoint) nilLabels(u *luPoint) bool {
-	a := l.ptr.PointsTo().Labels()
-	b := u.ptr.PointsTo().Labels()
+	a := l.pointerInfo.PointsTo().Labels()
+	b := u.pointerInfo.PointsTo().Labels()
 	if len(a) == 0 && len(b) == 0 {
 		return true
 	}
@@ -301,7 +301,7 @@ func (l *luPoint) mayBeSameMutexNilsAreSame(u *luPoint) bool {
 }
 
 func (l *luPoint) mayBeSameMutex(u *luPoint) bool {
-	return l.ptr.PointsTo().Intersects(u.ptr.PointsTo())
+	return l.pointerInfo.PointsTo().Intersects(u.pointerInfo.PointsTo())
 }
 
 func (l *luPoint) getOptiMethod() string {
@@ -317,11 +317,11 @@ func (l *luPoint) isDefer() bool {
 }
 
 func (l *luPoint) block() *ssa.BasicBlock {
-	return l.i.Block()
+	return l.ssaIns.Block()
 }
 
 func (l *luPoint) index() int {
-	return l.idx
+	return l.insIdx
 }
 
 func blockToLockPointDescending(lPoints map[*luPoint]ssa.Instruction) map[*ssa.BasicBlock][]*luPoint {
@@ -583,7 +583,7 @@ func groupByKind(ptInsMap map[*luPoint]ssa.Instruction) (*groupOps, *groupOps, *
 }
 
 func collectLUPoints(f *ssa.Function) (*groupOps, *groupOps, *groupOps, map[*luPoint]ssa.Instruction, map[ssa.Instruction]*luPoint) {
-	ptInsMap, insPtMap := gatherLuPoints(f)
+	ptInsMap, insPtMap := gatherLUPoints(f)
 	m, r, w := groupByKind(ptInsMap)
 	return m, r, w, ptInsMap, insPtMap
 }
@@ -734,8 +734,8 @@ func collectLUPairs(f *ssa.Function, funcSummaryMap map[*ssa.Function]*functionS
 			legalLUPairs = append(legalLUPairs, lup)
 
 			numPairsInFunction++
-			lup.l.id = numPairsInFunction
-			lup.u.id = numPairsInFunction
+			lup.l.idInFunc = numPairsInFunction
+			lup.u.idInFunc = numPairsInFunction
 			lup.l.isLambda = summary.isLambda
 			lup.u.isLambda = summary.isLambda
 			if lup.u.isDefer() {

@@ -12,7 +12,7 @@ import (
 	"golang.org/x/tools/go/ssa"
 )
 
-func getLuPoint(call ssa.CallCommon, isADefer bool) *luPoint {
+func getLUPoint(call ssa.CallCommon, isADefer bool) *luPoint {
 	if call.IsInvoke() {
 		return nil
 	}
@@ -53,14 +53,14 @@ func getLuPoint(call ssa.CallCommon, isADefer bool) *luPoint {
 
 func createLUPoint(ins ssa.Instruction) *luPoint {
 	if call, ok := ins.(*ssa.Call); ok {
-		return getLuPoint(call.Call, false)
+		return getLUPoint(call.Call, false)
 	} else if call, ok := ins.(*ssa.Defer); ok {
-		return getLuPoint(call.Call, true)
+		return getLUPoint(call.Call, true)
 	}
 	return nil
 }
 
-func gatherLuPoints(f *ssa.Function) (map[*luPoint]ssa.Instruction, map[ssa.Instruction]*luPoint) {
+func gatherLUPoints(f *ssa.Function) (map[*luPoint]ssa.Instruction, map[ssa.Instruction]*luPoint) {
 	if f == nil {
 		return nil, nil
 	}
@@ -70,9 +70,9 @@ func gatherLuPoints(f *ssa.Function) (map[*luPoint]ssa.Instruction, map[ssa.Inst
 	for _, blk := range f.Blocks {
 		for idx, ins := range blk.Instrs {
 			if pt := createLUPoint(ins); pt != nil {
-				pt.idx = idx
+				pt.insIdx = idx
 				pts[pt] = ins
-				pt.i = ins
+				pt.ssaIns = ins
 				insMap[ins] = pt
 			}
 		}

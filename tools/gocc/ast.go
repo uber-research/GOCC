@@ -15,7 +15,6 @@ import (
 	"go/format"
 	"go/token"
 	"go/types"
-	"log"
 	"os"
 	"sort"
 	"strconv"
@@ -67,7 +66,7 @@ func isPromotedField(e ast.Expr, typesMap map[ast.Expr]types.TypeAndValue) bool 
 			return true
 		}
 	}
-	panic("Not present in _typesMap!!")
+	panic("Not present in typesMap!")
 }
 
 // adds context variable definition at the beginning of the function's statement list
@@ -95,8 +94,6 @@ func insertOptiLockDecl(stmtsList *[]ast.Stmt, sigPos token.Pos, count map[int]e
 }
 
 func processASTFile(pkg *packages.Package, file *ast.File, luPairs []*luPair) (map[ast.Node]*luPoint, map[*ast.CallExpr]*ast.CallExpr, map[*ast.FuncDecl]map[int]empty, map[*ast.FuncLit]map[int]empty) {
-
-	log.Printf("AST file %v\n", file.Name.Name)
 	typesMap := pkg.TypesInfo.Types
 	filteredPoints := map[ast.Node]*luPoint{}
 	conversionMap := map[*ast.CallExpr]*ast.CallExpr{}
@@ -129,7 +126,7 @@ func processASTFile(pkg *packages.Package, file *ast.File, luPairs []*luPair) (m
 
 			fun := &ast.SelectorExpr{
 				X: &ast.Ident{
-					Name:    _optiLockName + strconv.Itoa(pt.id),
+					Name:    _optiLockName + strconv.Itoa(pt.idInFunc),
 					NamePos: se.X.Pos(),
 				},
 				Sel: theSel,
@@ -170,22 +167,22 @@ func processASTFile(pkg *packages.Package, file *ast.File, luPairs []*luPair) (m
 		if pt.isLambda {
 			v := nearestFunctionLit(pt)
 			if v == nil {
-				panic("findNearestFunctionLit not found!!")
+				panic("nearestFunctionLit not found!!")
 			}
 			if m, ok := funcLitMap[v]; ok {
-				m[pt.id] = emptyStruct
+				m[pt.idInFunc] = emptyStruct
 			} else {
-				funcLitMap[v] = map[int]empty{pt.id: emptyStruct}
+				funcLitMap[v] = map[int]empty{pt.idInFunc: emptyStruct}
 			}
 		} else {
 			v := nearestFunctionDecl(pt)
 			if v == nil {
-				panic("findNearestFunctionDecl not found!!")
+				panic("nearestFunctionDecl not found!!")
 			}
 			if m, ok := funcDeclMap[v]; ok {
-				m[pt.id] = emptyStruct
+				m[pt.idInFunc] = emptyStruct
 			} else {
-				funcDeclMap[v] = map[int]empty{pt.id: emptyStruct}
+				funcDeclMap[v] = map[int]empty{pt.idInFunc: emptyStruct}
 			}
 		}
 	}
