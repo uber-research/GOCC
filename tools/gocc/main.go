@@ -9,12 +9,10 @@
 package main
 
 import (
-	"bufio"
 	"flag"
 	"fmt"
 	"log"
 	"os"
-	"strconv"
 	"strings"
 
 	libbuilder "github.com/uber-research/GOCC/lib/builder"
@@ -57,11 +55,10 @@ type gocc struct {
 	rewriteTestFile bool
 	synthetic       bool
 	verbose         bool
-	stat            bool
 	dryrun          bool
 }
 
-func NewGOCC(isSingleFile bool, rewriteTestFile bool, synthetic bool, verbose bool, stat bool, dryrun bool, inputFile string) *gocc {
+func NewGOCC(isSingleFile bool, rewriteTestFile bool, synthetic bool, verbose bool, dryrun bool, inputFile string) *gocc {
 	return &gocc{
 		mPkg:            make(map[string]int),
 		lockAliasMap:    make(map[ssa.Value][]ssa.Value),
@@ -73,7 +70,6 @@ func NewGOCC(isSingleFile bool, rewriteTestFile bool, synthetic bool, verbose bo
 		rewriteTestFile: rewriteTestFile,
 		synthetic:       synthetic,
 		verbose:         verbose,
-		stat:            stat,
 		dryrun:          dryrun,
 	}
 }
@@ -346,38 +342,12 @@ func (g *gocc) Process() {
 	g.dumpInfo()
 	dumpMetrics(g.funcSummaryMap)
 	g.transform()
-
-	if g.stat {
-		g.inputFile = strings.Replace(g.inputFile, "/", "_", -1)
-
-		f, err := os.Create("lockcount/" + g.inputFile + ".txt")
-		if err != nil {
-			fmt.Println(err)
-			return
-		}
-		defer f.Close()
-
-		w := bufio.NewWriter(f)
-		w.Flush()
-		d, err := os.Create("lockDistribution/" + g.inputFile + ".txt")
-		if err != nil {
-			fmt.Println(err)
-			return
-		}
-		defer d.Close()
-		w2 := bufio.NewWriter(d)
-		for key, value := range g.mPkg {
-			fmt.Fprintln(w2, key+":"+strconv.Itoa(value))
-		}
-		w2.Flush()
-	}
 }
 
 func main() {
 	var profilePath string
 	var inputFile string
 	dryrunPtr := flag.Bool("dryrun", false, "run without changes to files")
-	statsPtr := flag.Bool("stats", false, "dump out the stats information of the locks")
 	verbose := flag.Bool("verbose", true, "verbose output")
 	flag.StringVar(&inputFile, "input", _zap, "go source (file/dir) to analyze")
 	flag.StringVar(&profilePath, "profile", "", "use this profile file to filter hot functions")
@@ -391,6 +361,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	gizer := NewGOCC(strings.HasSuffix(inputFile, ".go"), *rewriteTestFile, *syntheticPtr, *verbose, *statsPtr, *dryrunPtr, inputFile)
+	gizer := NewGOCC(strings.HasSuffix(inputFile, ".go"), *rewriteTestFile, *syntheticPtr, *verbose, *dryrunPtr, inputFile)
 	gizer.Process()
 }

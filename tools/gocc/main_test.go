@@ -66,7 +66,7 @@ func TestPkgs(t *testing.T) {
 			cmd := []string{"git", "checkout", "--", tc.loc}
 			exec.Command(cmd[0], cmd[1:]...).Output()
 		}()
-		g := NewGOCC(false, tc.rewriteTest, false, true, true, false, tc.loc)
+		g := NewGOCC(false, tc.rewriteTest, false, true, false, tc.loc)
 		g.Process()
 
 		// Get diff

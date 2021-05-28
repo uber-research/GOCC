@@ -36,20 +36,6 @@ const (
 )
 const _intMax = int(^uint(0) >> 1)
 
-/*
-type luPoint interface {
-	ins() ssa.Instruction
-	block() *ssa.BasicBlock
-	call() *ssa.CallCommon
-	index() int
-	luType() luPointType
-	pointsToSet() pointer.PointsToSet
-	setPointsToSet(pointer.PointsToSet)
-	mayBeSameMutex(luPoint) bool
-	isDefer() bool
-	mutexValue() ssa.Value
-}*/
-
 type luPoint struct {
 	astPath   []ast.Node
 	i         ssa.Instruction
@@ -273,10 +259,6 @@ func (p *luPoint) mutexValue() ssa.Value {
 func (l *luPoint) pointsToSet() pointer.PointsToSet {
 	return l.ptr.PointsTo()
 }
-
-// func (l *luPoint) setIndirectPointsToSet(p pointer.PointsToSet) {
-// 	l.indPts = p
-// }
 
 func (l *luPoint) setAliasingPointer(p pointer.Pointer) {
 	l.ptr = p
@@ -653,9 +635,9 @@ func (s *functionSummary) compute(cgNode *callgraph.Node) {
 				s.numDefers++
 			}
 
-			// TODO: This is not correct.
+			// TODO: This is not 100% correct.
 			// In reality, we should check all callees of f, and disqualify it if we see calls to an unwanted function.
-			// For example, see lib/callgraph/builtin.go  for the set of build-in functions called, which do NOT emerge from a call instruction.
+			// For example, see lib/callgraph/builtin.go  for the set of built-in functions called, which do NOT emerge from a call instruction.
 			// For simplicity, we inspect only the call instructions and mark the calls to certain packages (fmt, io, runtime, ...) as unsafe.
 			if s.safe && unsafeInst(i, cgNode) {
 				s.safe = false
