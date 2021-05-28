@@ -29,7 +29,7 @@ func (g *gocc) isHotFunction(f *ssa.Function) bool {
 	funcName := normalizeFunctionName(f.RelString(f.Pkg.Pkg))
 	fullFuncName := canonicalName + "." + funcName
 
-	if !g.profileProvided {
+	if !g.hasProfile {
 		return true
 	}
 
@@ -60,7 +60,7 @@ func normalizeFunctionName(name string) string {
 }
 
 func (g *gocc) initProfile(profilePath string) {
-	g.profileProvided = true
+	g.hasProfile = true
 	f, err := os.Open(profilePath)
 	defer f.Close()
 	if err != nil {

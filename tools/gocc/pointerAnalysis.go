@@ -14,17 +14,17 @@ import (
 )
 
 // collectPointsToSet updates the PointsToSet in each of lPoints, uPoints, and dPoints
-func (g *gocc) collectPointsToSet(ssapkgs []*ssa.Package, pts map[*luPoint]ssa.Instruction) {
+func (g *gocc) collectPointsToSet() {
 	mainPkg := make([]*ssa.Package, 1)
 	if g.isSingleFile || !g.synthetic {
-		for _, pkg := range ssapkgs {
+		for _, pkg := range g.ssapkgs {
 			if pkg != nil && pkg.Pkg.Name() == "main" {
 				mainPkg[0] = pkg
 				break
 			}
 		}
 	} else {
-		for _, pkg := range ssapkgs {
+		for _, pkg := range g.ssapkgs {
 			if pkg != nil && pkg.Pkg.Name() == "main" {
 				if pkg.Func("OptiLockSyntheticMain") != nil {
 					mainPkg[0] = pkg
@@ -47,7 +47,7 @@ func (g *gocc) collectPointsToSet(ssapkgs []*ssa.Package, pts map[*luPoint]ssa.I
 	valToLUPointMap := map[ssa.Value][]*luPoint{}
 
 	// collect all values
-	for k, _ := range pts {
+	for k, _ := range g.allLUPoints {
 		val := k.mutexValue()
 		pc.Queries[val] = struct{}{}
 		//	pc.IndirectQueries[val] = struct{}{}

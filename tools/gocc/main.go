@@ -12,7 +12,6 @@ import (
 	"bufio"
 	"flag"
 	"fmt"
-	"go/token"
 	"log"
 	"os"
 	"strconv"
@@ -29,28 +28,6 @@ import (
 // TODO: manual SSA to detect a unique name for the majic lock
 const _optiLockName = "optiLock"
 
-// for any lock, lockInfo stores the positions where it locks and (defer) unlocks
-// isValue indicates whether this lock is lock object or pointer in source code
-type lockInfo struct {
-	lockPosition   []token.Pos
-	unlockPosition []token.Pos
-	isValue        bool
-	isRWMutex      bool
-}
-
-// statistics
-var numLock = 0
-var numUnlock = 0
-var numDeferUnlock = 0
-var lockUnlockSameBB = 0
-var lockDeferUnlockSameBB = 0
-var lockUnlockPairDifferentBB = 0
-var lockDeferUnlockPairDifferentBB = 0
-var unsafeLock = 0
-var unpaired = 0
-var paired = 0
-var unReachableLambdas = 0
-
 // generate the name of the packages that violates HTM
 //var _blockList []string = []string{"os.", "io.", "fmt.", "runtime.", "syscall."}
 //var _blockedPkg []string = []string{"os", "io", "fmt", "runtime", "syscall"}
@@ -63,11 +40,20 @@ type gocc struct {
 	lockAliasMap    map[ssa.Value][]ssa.Value
 	pkgName         map[string]empty
 	hotFuncMap      map[string]empty
+	funcSummaryMap  map[*ssa.Function]*functionSummary
+	allLUPoints     map[*luPoint]ssa.Instruction
+	allLUFunc       map[*luPoint]*ssa.Function
+	pkgLpoints      map[string]int
+	luPairs         []*luPair
+	pkgs            []*packages.Package
+	ssapkgs         []*ssa.Package
+	prog            *ssa.Program
+	cg              *callgraph.Graph
 	outputPath      string
 	inputFile       string
 	profilePath     string
 	isSingleFile    bool
-	profileProvided bool
+	hasProfile      bool
 	rewriteTestFile bool
 	synthetic       bool
 	verbose         bool
@@ -83,12 +69,12 @@ func NewGOCC(isSingleFile bool, rewriteTestFile bool, synthetic bool, verbose bo
 		hotFuncMap:      make(map[string]empty),
 		inputFile:       inputFile,
 		isSingleFile:    isSingleFile,
-		profileProvided: false,
+		hasProfile:      false,
 		rewriteTestFile: rewriteTestFile,
 		synthetic:       synthetic,
 		verbose:         verbose,
-		dryrun:          dryrun,
 		stat:            stat,
+		dryrun:          dryrun,
 	}
 }
 
@@ -208,51 +194,16 @@ const _gocache = "/Users/milind/gocode/src/github.com/patrickmn/go-cache/"
 const _fastcache = "/Users/milind/gocode/src/github.com/VictoriaMetrics/fastcache"
 const _zap = "/Users/milind/gocode/src/go.uber.org/zap/"
 
-func (g *gocc) Process() {
-	if info, err := os.Stat(g.profilePath); err == nil && !info.IsDir() {
-		g.initProfile(g.profilePath)
-	} else {
-		log.Println("No valid profiles to apply")
-	}
-
-	if g.dryrun {
-		fmt.Println("Running in dryrun mode - modified ASTs will not be written out.")
-	}
-
-	if info, err := os.Stat(g.inputFile); err == nil && info.IsDir() {
-		g.inputFile += "/..."
-	}
-
-	var pkgs []*packages.Package
-
-	pkgConfig := &packages.Config{Mode: packages.LoadAllSyntax, Tests: true}
-
-	pkgs, err := packages.Load(pkgConfig, g.inputFile)
-	if err != nil {
-		panic("something wrong during loading!")
-	}
-
-	for _, pkg := range pkgs {
-		g.pkgName[pkg.Name] = emptyStruct
-	}
-
-	prog, ssapkgs := ssautil.AllPackages(pkgs /*ssa.BuilderMode(0)*/, ssa.NaiveForm|ssa.GlobalDebug)
-	// prog, ssapkgs := ssautil.AllPackages(pkgs, ssa.GlobalDebug)
-	libbuilder.BuildPackages(prog, ssapkgs, true, true)
-	mCallGraph := libcg.BuildRtaCG(prog, true)
-
-	// TODO: first pass on optimized form and second pass on naive form to check if it is a value or object
-
-	funcSummaryMap := map[*ssa.Function]*functionSummary{}
-	globalLUPoints := map[*luPoint]ssa.Instruction{}
-	globalLUFunc := map[*luPoint]*ssa.Function{}
-
-	pkgLpoints := map[string]int{}
+func (g *gocc) collectAllLUPoints() {
+	g.funcSummaryMap = map[*ssa.Function]*functionSummary{}
+	g.allLUPoints = map[*luPoint]ssa.Instruction{}
+	g.allLUFunc = map[*luPoint]*ssa.Function{}
+	g.pkgLpoints = map[string]int{}
 
 	totW := 0
-	for node := range mCallGraph.Nodes {
+	for node := range g.cg.Nodes {
 		m, r, w, ptToIns, insToPt := collectLUPoints(node)
-		funcSummaryMap[node] = &functionSummary{
+		g.funcSummaryMap[node] = &functionSummary{
 			f:       node,
 			ptToIns: ptToIns,
 			insToPt: insToPt,
@@ -265,8 +216,8 @@ func (g *gocc) Process() {
 		// }
 		totW += len(w.d) + len(w.l) + len(w.u)
 		for k, v := range ptToIns {
-			globalLUPoints[k] = v
-			globalLUFunc[k] = node
+			g.allLUPoints[k] = v
+			g.allLUFunc[k] = node
 		}
 
 		if node.Pkg == nil {
@@ -274,82 +225,84 @@ func (g *gocc) Process() {
 		}
 		pkg := node.Pkg.Pkg.Name()
 
-		if _, ok := pkgLpoints[pkg]; !ok {
-			pkgLpoints[pkg] = len(ptToIns)
+		if _, ok := g.pkgLpoints[pkg]; !ok {
+			g.pkgLpoints[pkg] = len(ptToIns)
 		} else {
-			pkgLpoints[pkg] += len(ptToIns)
+			g.pkgLpoints[pkg] += len(ptToIns)
 		}
 
 		//We'll compute the remaining summary after alias analysis
 	}
 	fmt.Printf("totw = %d\n", totW)
+}
 
-	// Do alias analysis
-	g.collectPointsToSet(ssapkgs, globalLUPoints)
-	if g.verbose {
-		log.Printf("globalLUPoints = %d", len(globalLUPoints))
-	}
-
-	// Greedily compute function summaries (can be done on need basis also)
-	for f, n := range mCallGraph.Nodes {
-		if f.Pkg != nil && f.Pkg.Pkg.Name() == "cache" {
-			fmt.Println("..")
-		}
-		funcSummaryMap[f].compute(n)
-	}
-
-	// Set isLambda
-	for f, _ := range funcSummaryMap {
+func (g *gocc) annotateLambda() {
+	for f, _ := range g.funcSummaryMap {
 		for _, c := range f.AnonFuncs {
-			if _, ok := funcSummaryMap[c]; ok {
-				funcSummaryMap[c].isLambda = true
+			if _, ok := g.funcSummaryMap[c]; ok {
+				g.funcSummaryMap[c].isLambda = true
 			} else {
-				unReachableLambdas++
 				log.Printf("lambda %v not found in funcSummaryMap\n", c)
 			}
 		}
 	}
+}
 
-	// per function
-	luPairs := []*luPair{}
-	for f, _ := range funcSummaryMap {
+func (g *gocc) collectAllLUPairs() {
+	g.luPairs = []*luPair{}
+	for f, _ := range g.funcSummaryMap {
 		if !g.isHotFunction(f) {
 			continue
 		}
 		//		if f.Name() == "Counter" /*|| f.Name() == "foo" || f.Name() == "bax" */ {
 		//			fmt.Println("..")
 		//		}
-		pairs := collectLUPairs(f, funcSummaryMap, mCallGraph.Nodes)
-		luPairs = append(luPairs, pairs...)
+		pairs := collectLUPairs(f, g.funcSummaryMap, g.cg.Nodes)
+		g.luPairs = append(g.luPairs, pairs...)
+	}
+}
+
+func (g *gocc) buildCG() {
+	pkgConfig := &packages.Config{Mode: packages.LoadAllSyntax, Tests: true}
+	var err error
+	g.pkgs, err = packages.Load(pkgConfig, g.inputFile)
+	if err != nil {
+		log.Fatalf("something wrong during loading! %v", err)
 	}
 
-	log.Printf("total luPairs = %d", len(luPairs))
-	// order by package
-	pkgLupair := map[string][]*luPair{}
-	for _, p := range luPairs {
-		f, _ := globalLUFunc[p.l]
-		if f.Pkg == nil {
-			continue
-		}
-		pkg := f.Pkg.Pkg.Name()
-
-		if v, ok := pkgLupair[pkg]; !ok {
-			pkgLupair[pkg] = []*luPair{p}
-		} else {
-			pkgLupair[pkg] = append(v, p)
-		}
+	for _, pkg := range g.pkgs {
+		g.pkgName[pkg.Name] = emptyStruct
 	}
+	g.prog, g.ssapkgs = ssautil.AllPackages(g.pkgs /*ssa.BuilderMode(0)*/, ssa.NaiveForm|ssa.GlobalDebug)
+	libbuilder.BuildPackages(g.prog, g.ssapkgs, true, true)
+	g.cg = libcg.BuildRtaCG(g.prog, true)
+}
 
+func (g *gocc) dumpInfo() {
 	if g.verbose {
-		log.Printf("Num pkgs containing at least one lock =  %d\n", len(pkgLpoints))
+		pkgLupair := map[string][]*luPair{}
+		for _, p := range g.luPairs {
+			f, _ := g.allLUFunc[p.l]
+			if f.Pkg == nil {
+				continue
+			}
+			pkg := f.Pkg.Pkg.Name()
+
+			if v, ok := pkgLupair[pkg]; !ok {
+				pkgLupair[pkg] = []*luPair{p}
+			} else {
+				pkgLupair[pkg] = append(v, p)
+			}
+		}
+		log.Printf("Num pkgs containing at least one lock =  %d\n", len(g.pkgLpoints))
 		log.Printf("Num pkgs containing at least one paired lock =  %d\n", len(pkgLupair))
 		for p, sl := range pkgLupair {
 			for _, s := range sl {
-				f, _ := globalLUFunc[s.l]
+				f, _ := g.allLUFunc[s.l]
 				log.Printf("lupair in pkg %v, func %v\n", p, f)
 			}
 		}
-		for p, num := range pkgLpoints {
+		for p, num := range g.pkgLpoints {
 			sl, ok := pkgLupair[p]
 			lenPairs := 0
 			if ok {
@@ -358,8 +311,46 @@ func (g *gocc) Process() {
 			log.Printf("pkg %v: lupoints = %d, lupairs= %d\n", p, num, lenPairs)
 		}
 	}
-	dumpMetrics(funcSummaryMap)
-	g.mapSSAtoAST(prog, pkgs, luPairs)
+}
+
+func (g *gocc) Process() {
+	if info, err := os.Stat(g.profilePath); err == nil && !info.IsDir() {
+		g.initProfile(g.profilePath)
+	} else {
+		log.Println("No valid profiles to apply")
+	}
+
+	if g.dryrun {
+		log.Println("Running in dryrun mode - modified ASTs will not be written out.")
+	}
+
+	if info, err := os.Stat(g.inputFile); err == nil && info.IsDir() {
+		g.inputFile += "/..."
+	}
+
+	g.buildCG()
+
+	// TODO: first pass on optimized form and second pass on naive form to check if it is a value or object
+
+	g.collectAllLUPoints()
+	// Do alias analysis
+	g.collectPointsToSet()
+	if g.verbose {
+		log.Printf("globalLUPoints = %d", len(g.allLUPoints))
+	}
+
+	// Greedily compute function summaries (can be done on need basis also)
+	for f, n := range g.cg.Nodes {
+		g.funcSummaryMap[f].compute(n)
+	}
+	g.annotateLambda()
+	g.collectAllLUPairs()
+	log.Printf("total luPairs = %d", len(g.luPairs))
+	// order by package
+
+	g.dumpInfo()
+	dumpMetrics(g.funcSummaryMap)
+	g.transform()
 
 	if g.stat {
 		g.inputFile = strings.Replace(g.inputFile, "/", "_", -1)
@@ -372,27 +363,13 @@ func (g *gocc) Process() {
 		defer f.Close()
 
 		w := bufio.NewWriter(f)
-
-		fmt.Fprintln(w, "Number of locks: ", numLock)
-		fmt.Fprintln(w, "Number of Unlocks: ", numUnlock)
-		fmt.Fprintln(w, "Number of deferred Unlocks: ", numDeferUnlock)
-		fmt.Fprintln(w, "Lock pairs in same BB: ", lockUnlockSameBB)
-		fmt.Fprintln(w, "Defer lock pairs in same BB: ", lockDeferUnlockSameBB)
-		fmt.Fprintln(w, "Lock pairs dominate each other: ", lockUnlockPairDifferentBB)
-		fmt.Fprintln(w, "Defer Lock pairs dominate each other: ", lockDeferUnlockPairDifferentBB)
-		fmt.Fprintln(w, "Unsafe lock instructions that are dropped: ", unsafeLock)
-		fmt.Fprintln(w, "Unpaired locks: ", unpaired)
-		fmt.Fprintln(w, "Paired locks: ", paired)
-
 		w.Flush()
-
 		d, err := os.Create("lockDistribution/" + g.inputFile + ".txt")
 		if err != nil {
 			fmt.Println(err)
 			return
 		}
 		defer d.Close()
-
 		w2 := bufio.NewWriter(d)
 		for key, value := range g.mPkg {
 			fmt.Fprintln(w2, key+":"+strconv.Itoa(value))
@@ -402,26 +379,17 @@ func (g *gocc) Process() {
 }
 
 func main() {
-	// command-line argument
-	dryrunPtr := flag.Bool("dryrun", false, "indicates if AST will be written out or not")
+	var profilePath string
+	var inputFile string
+	dryrunPtr := flag.Bool("dryrun", false, "run without changes to files")
 	statsPtr := flag.Bool("stats", false, "dump out the stats information of the locks")
 	verbose := flag.Bool("verbose", true, "verbose output")
-
-	var inputFile string
-	//	flag.StringVar(&inputFile, "input", "testdata/test26.go", "source file to analyze")
-	flag.StringVar(&inputFile, "input", _zap, "source file to analyze")
-
-	var profilePath string
-	flag.StringVar(&profilePath, "profile", "", "profiling of hot function")
-
-	syntheticPtr := flag.Bool("synthetic", false, "set true if the synthetic main from transformer is used")
-
-	rewriteTestFile := flag.Bool("rewriteTest", false, "set true if you want to change testing file")
-
+	flag.StringVar(&inputFile, "input", _zap, "go source (file/dir) to analyze")
+	flag.StringVar(&profilePath, "profile", "", "use this profile file to filter hot functions")
+	syntheticPtr := flag.Bool("synthetic", false, "a synthetic main is crated")
+	rewriteTestFile := flag.Bool("rewriteTest", false, "rewrite _test.go files")
 	flag.Parse()
 
-	// HACK
-	//*syntheticPtr = true
 	if inputFile == "" {
 		fmt.Println("Please provide the input!")
 		flag.PrintDefaults()
@@ -430,5 +398,4 @@ func main() {
 
 	gizer := NewGOCC(strings.HasSuffix(inputFile, ".go"), *rewriteTestFile, *syntheticPtr, *verbose, *statsPtr, *dryrunPtr, inputFile)
 	gizer.Process()
-
 }

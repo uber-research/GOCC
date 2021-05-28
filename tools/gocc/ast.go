@@ -10,11 +10,9 @@ package main
 
 import (
 	"bufio"
-	"bytes"
 	"fmt"
 	"go/ast"
 	"go/format"
-	"go/printer"
 	"go/token"
 	"go/types"
 	"log"
@@ -25,7 +23,6 @@ import (
 
 	"golang.org/x/tools/go/ast/astutil"
 	"golang.org/x/tools/go/packages"
-	"golang.org/x/tools/go/ssa"
 )
 
 // this map will mark which lock position and paths are in lambda function
@@ -33,21 +30,6 @@ import (
 //var _lockInLambdaFunc map[token.Pos]bool
 
 const _rtmLibPath = "github.com/uber-research/GOCC/tools/gocc/rtmlib"
-
-// this map will keep the all blkstmt position whose parent is funclit
-var _blkstmtMap map[token.Pos]bool = map[token.Pos]bool{}
-
-func isPromotedField(e ast.Expr, typesMap map[ast.Expr]types.TypeAndValue) bool {
-	if v, ok := typesMap[e]; ok {
-		switch v.Type.String() {
-		case "*sync.Mutex", "sync.Mutex", "*sync.RWMutex", "sync.RWMutex":
-			return false
-		default:
-			return true
-		}
-	}
-	panic("Not present in _typesMap!!")
-}
 
 type luConsts struct {
 	method         string
@@ -76,36 +58,20 @@ func ensureMethodMatch(sel *ast.SelectorExpr, lup *luPoint) bool {
 	return false
 }
 
-// return if the ssa function is in the given input package so that we can transform
-func (g *gocc) inFile(ssaF *ssa.Function) bool {
-	if _, ok := g.pkgName[ssaF.Pkg.Pkg.Name()]; ok {
-		return true
-	}
-	return false
-}
-
-func pathContains(replacePath [][]ast.Node, curPos token.Pos) bool {
-	for _, path := range replacePath {
-		for _, node := range path {
-			if node.Pos() == curPos {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-func singlePathContains(singlePath []ast.Node, curPos token.Pos) bool {
-	for _, node := range singlePath {
-		if node.Pos() == curPos {
+func isPromotedField(e ast.Expr, typesMap map[ast.Expr]types.TypeAndValue) bool {
+	if v, ok := typesMap[e]; ok {
+		switch v.Type.String() {
+		case "*sync.Mutex", "sync.Mutex", "*sync.RWMutex", "sync.RWMutex":
+			return false
+		default:
 			return true
 		}
 	}
-	return false
+	panic("Not present in _typesMap!!")
 }
 
 // adds context variable definition at the beginning of the function's statement list
-func addContextInitStmt(stmtsList *[]ast.Stmt, sigPos token.Pos, count map[int]empty) {
+func insertOptiLockDecl(stmtsList *[]ast.Stmt, sigPos token.Pos, count map[int]empty) {
 	// Get sorted count for stable diff
 	countSorted := make([]int, len(count))
 	pos := 0
@@ -202,7 +168,7 @@ func processASTFile(pkg *packages.Package, file *ast.File, luPairs []*luPair) (m
 
 	for _, pt := range filteredPoints {
 		if pt.isLambda {
-			v := findNearestFunctionLit(pt)
+			v := nearestFunctionLit(pt)
 			if v == nil {
 				panic("findNearestFunctionLit not found!!")
 			}
@@ -212,7 +178,7 @@ func processASTFile(pkg *packages.Package, file *ast.File, luPairs []*luPair) (m
 				funcLitMap[v] = map[int]empty{pt.id: emptyStruct}
 			}
 		} else {
-			v := findNearestFunctionDecl(pt)
+			v := nearestFunctionDecl(pt)
 			if v == nil {
 				panic("findNearestFunctionDecl not found!!")
 			}
@@ -226,7 +192,7 @@ func processASTFile(pkg *packages.Package, file *ast.File, luPairs []*luPair) (m
 	return filteredPoints, conversionMap, funcDeclMap, funcLitMap
 }
 
-func findNearestFunctionDecl(pt *luPoint) *ast.FuncDecl {
+func nearestFunctionDecl(pt *luPoint) *ast.FuncDecl {
 	for i := 0; i < len(pt.astPath); i++ {
 		if _, ok := pt.astPath[i].(*ast.BlockStmt); ok {
 			/* TODO: can't find Name if blk.Name() != "Body" {
@@ -241,7 +207,7 @@ func findNearestFunctionDecl(pt *luPoint) *ast.FuncDecl {
 	}
 	return nil
 }
-func findNearestFunctionLit(pt *luPoint) *ast.FuncLit {
+func nearestFunctionLit(pt *luPoint) *ast.FuncLit {
 	for i := 0; i < len(pt.astPath); i++ {
 		if _, ok := pt.astPath[i].(*ast.BlockStmt); ok {
 			/* TODO: can't find Name if blk.Name() != "Body" {
@@ -257,8 +223,8 @@ func findNearestFunctionLit(pt *luPoint) *ast.FuncLit {
 	return nil
 }
 
-func (g *gocc) mapSSAtoAST(prog *ssa.Program, pkgs []*packages.Package, luPairs []*luPair) {
-	for _, pkg := range pkgs {
+func (g *gocc) transform() {
+	for _, pkg := range g.pkgs {
 		for _, file := range pkg.Syntax {
 			// don't rewrite testing file by default
 			if g.rewriteTestFile == false {
@@ -268,34 +234,22 @@ func (g *gocc) mapSSAtoAST(prog *ssa.Program, pkgs []*packages.Package, luPairs 
 					continue
 				}
 			}
-			filteredPoints, conversionMap, funcDeclMap, funcLitMap := processASTFile(pkg, file, luPairs)
+			filteredPoints, conversionMap, funcDeclMap, funcLitMap := processASTFile(pkg, file, g.luPairs)
 
 			if len(filteredPoints) > 0 {
-				fmt.Printf("%v has %v locks to rewrite\n", prog.Fset.Position(file.Pos()).Filename, len(filteredPoints))
+				fmt.Printf("%v has %v locks to rewrite\n", g.prog.Fset.Position(file.Pos()).Filename, len(filteredPoints))
 			}
 			if len(filteredPoints) > 0 && !g.dryrun {
 				fmt.Printf("Number of locks to rewrite %v\n", len(filteredPoints))
-				ast := rewriteAST(file, pkg, conversionMap, funcDeclMap, funcLitMap)
-				filename := prog.Fset.Position(ast.Pos()).Filename
-				g.writeAST(ast, g.inputFile, pkg, filename)
+				ast := mutateAST(file, pkg, conversionMap, funcDeclMap, funcLitMap)
+				filename := g.prog.Fset.Position(ast.Pos()).Filename
+				g.serializeAST(ast, g.inputFile, pkg, filename)
 			}
 		}
 	}
 }
 
-// given the function f from the pkg, replace all the valid lock/unlock with htm library
-// currently it supports two types of locks: sync.Mutex and sync.RWMutex
-// for each type of lock operations, it can be called on 3 receivers:
-// 1. Lock pointer, e.g. m := &sync.Mutex
-// 2. Lock object, e.g. m:= sync.Mutex
-// 3. Promoted field object. e.g.
-// type Foo struct {
-// 	sync.Mutex
-// }
-// foo := Foo{}
-// foo.Lock()
-// 4. Promoted field pointer
-func rewriteAST(f ast.Node, pkg *packages.Package, conversionMap map[*ast.CallExpr]*ast.CallExpr, funcDeclMap map[*ast.FuncDecl]map[int]empty, funcLitMap map[*ast.FuncLit]map[int]empty) ast.Node {
+func mutateAST(f ast.Node, pkg *packages.Package, conversionMap map[*ast.CallExpr]*ast.CallExpr, funcDeclMap map[*ast.FuncDecl]map[int]empty, funcLitMap map[*ast.FuncLit]map[int]empty) ast.Node {
 	fmt.Println("  Rewriting field accesses in the file...")
 	addImport := false
 	postFunc := func(c *astutil.Cursor) bool {
@@ -328,13 +282,13 @@ func rewriteAST(f ast.Node, pkg *packages.Package, conversionMap map[*ast.CallEx
 		case *ast.FuncDecl:
 			{
 				if v, ok := funcDeclMap[n]; ok {
-					addContextInitStmt(&(n.Body.List), n.Name.NamePos, v)
+					insertOptiLockDecl(&(n.Body.List), n.Name.NamePos, v)
 				}
 			}
 		case *ast.FuncLit:
 			{
 				if v, ok := funcLitMap[n]; ok {
-					addContextInitStmt(&(n.Body.List), n.Body.Lbrace, v)
+					insertOptiLockDecl(&(n.Body.List), n.Body.Lbrace, v)
 				}
 			}
 		}
@@ -343,7 +297,7 @@ func rewriteAST(f ast.Node, pkg *packages.Package, conversionMap map[*ast.CallEx
 	return astutil.Apply(f, nil, postFunc)
 }
 
-func (g *gocc) writeAST(f ast.Node, sourceFilePath string, pkg *packages.Package, filename string) {
+func (g *gocc) serializeAST(f ast.Node, sourceFilePath string, pkg *packages.Package, filename string) {
 	if g.dryrun {
 		return
 	}
@@ -365,76 +319,4 @@ func (g *gocc) writeAST(f ast.Node, sourceFilePath string, pkg *packages.Package
 		panic(err)
 	}
 	w.Flush()
-}
-
-func argContains(args []string, target string) bool {
-	for _, val := range args {
-		if val == target {
-			return true
-		}
-	}
-	return false
-}
-
-func getLockName(f ast.Node, pkg *packages.Package, path []ast.Node) string {
-	var str string
-	postFunc := func(c *astutil.Cursor) bool {
-		node := c.Node()
-		switch n := node.(type) {
-		case *ast.CallExpr:
-			if singlePathContains(path, n.Pos()) {
-				if se, ok := n.Fun.(*ast.SelectorExpr); ok {
-					if se.Sel.Name == "Lock" || se.Sel.Name == "Unlock" || se.Sel.Name == "RLock" || se.Sel.Name == "RUnlock" {
-						var selectorExpr bytes.Buffer
-						err := printer.Fprint(&selectorExpr, pkg.Fset, se.X)
-						if err != nil {
-							log.Fatalf("failed printing %s", err)
-						}
-						str = selectorExpr.String()
-						return true
-					}
-				}
-			}
-		}
-		return true
-	}
-	astutil.Apply(f, nil, postFunc)
-	return str
-}
-
-// the goal of this function is to check whether the lock/unlock operations are called on the same lock
-// the criteria here is the caller name
-// TODO: cache the file information so that we don't need to use pathcontain again... which needs a global map to store file and lock relation
-func checkSameLock(l lockInfo, pkgs []*packages.Package) bool {
-	for _, pkg := range pkgs {
-		for _, file := range pkg.Syntax {
-			lockNamePath, ok := astutil.PathEnclosingInterval(file, l.lockPosition[0], l.lockPosition[0])
-			if !ok {
-				continue
-			}
-			// this file contains the lock and unlock
-			lockName := getLockName(file, pkg, lockNamePath)
-			// all lock() name should be the same
-			for _, l := range l.lockPosition {
-				lockPath, ok := astutil.PathEnclosingInterval(file, l, l)
-				if ok {
-					lName := getLockName(file, pkg, lockPath)
-					if lockName != lName {
-						return false
-					}
-				}
-			}
-			// all unlock() name should be the same
-			for _, ul := range l.unlockPosition {
-				unlockPath, ok := astutil.PathEnclosingInterval(file, ul, ul)
-				if ok {
-					ulName := getLockName(file, pkg, unlockPath)
-					if ulName != lockName {
-						return false
-					}
-				}
-			}
-		}
-	}
-	return true
 }
