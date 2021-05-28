@@ -200,7 +200,7 @@ func (g *gocc) collectAllLUPoints() {
 	g.allLUFunc = map[*luPoint]*ssa.Function{}
 	g.pkgLpoints = map[string]int{}
 
-	totW := 0
+	totalLUPoints := 0
 	for node := range g.cg.Nodes {
 		m, r, w, ptToIns, insToPt := collectLUPoints(node)
 		g.funcSummaryMap[node] = &functionSummary{
@@ -211,10 +211,7 @@ func (g *gocc) collectAllLUPoints() {
 			r:       r,
 			w:       w,
 		}
-		// if node.Pkg.Pkg.Name() == "cache" {
-		// 	fmt.Printf("pkg = %s, func = %v, m=%d, r = %d, w = %d\n", node.Pkg.Pkg.Name(), node.Name(), len(m.d)+len(m.l)+len(m.u), len(r.d)+len(r.l)+len(r.u), len(w.d)+len(w.l)+len(w.u))
-		// }
-		totW += len(w.d) + len(w.l) + len(w.u)
+		totalLUPoints += len(w.d) + len(w.l) + len(w.u)
 		for k, v := range ptToIns {
 			g.allLUPoints[k] = v
 			g.allLUFunc[k] = node
@@ -230,10 +227,8 @@ func (g *gocc) collectAllLUPoints() {
 		} else {
 			g.pkgLpoints[pkg] += len(ptToIns)
 		}
-
-		//We'll compute the remaining summary after alias analysis
 	}
-	fmt.Printf("totw = %d\n", totW)
+	log.Printf("totalLUPoints = %d\n", totalLUPoints)
 }
 
 func (g *gocc) annotateLambda() {
