@@ -12,6 +12,7 @@ import (
 	"io/ioutil"
 	"os/exec"
 	"regexp"
+	"strconv"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -19,13 +20,15 @@ import (
 
 func TestPkgs(t *testing.T) {
 
-	tt := []struct {
+	type testcases struct {
 		loc         string
 		rev         string
 		name        string
 		diffFile    string
 		rewriteTest bool
-	}{
+	}
+
+	tt := []testcases{
 		{
 			loc:         "./testdata/src/github.com/uber-go/tally",
 			name:        "tally",
@@ -56,6 +59,20 @@ func TestPkgs(t *testing.T) {
 			diffFile:    "testdata/fastcache.diff",
 			rewriteTest: false,
 		},
+	}
+
+	ignoreTestId := map[int]empty{15: emptyStruct}
+	for i := 1; i <= 26; i++ {
+		if _, ok := ignoreTestId[i]; ok {
+			continue
+		}
+		id := strconv.Itoa(i)
+		tt = append(tt, testcases{
+			loc:         "./testdata/test" + id + ".go",
+			name:        "test" + id,
+			diffFile:    "testdata/test" + id + ".diff",
+			rewriteTest: false,
+		})
 	}
 
 	var replaceRegex = regexp.MustCompile(`(?s)\nindex(.*?)\n`)

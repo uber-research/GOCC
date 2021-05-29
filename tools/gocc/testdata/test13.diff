@@ -1,0 +1,64 @@
+diff --git a/tools/gocc/testdata/test13.go b/tools/gocc/testdata/test13.go
+index fdfbc57..7ea87d5 100644
+--- a/tools/gocc/testdata/test13.go
++++ b/tools/gocc/testdata/test13.go
+@@ -9,6 +9,7 @@
+ package main
+ 
+ import (
++	rtm "github.com/uber-research/GOCC/tools/gocc/rtmlib"
+ 	"sync"
+ )
+ 
+@@ -22,30 +23,37 @@ type ptrScope struct {
+ 
+ // test different call semantics
+ func main() {
++	optiLock7 := rtm.OptiLock{}
++	optiLock6 := rtm.OptiLock{}
++	optiLock5 := rtm.OptiLock{}
++	optiLock4 := rtm.OptiLock{}
++	optiLock3 := rtm.OptiLock{}
++	optiLock2 := rtm.OptiLock{}
++	optiLock1 := rtm.OptiLock{}
+ 	n := sync.Mutex{}
+-	n.Lock()
+-	n.Unlock()
++	optiLock5.Lock(&n)
++	optiLock5.Unlock(&n)
+ 
+ 	s := &scope{}
+-	s.cm.Lock()
+-	s.cm.Unlock()
++	optiLock4.Lock(&s.cm)
++	optiLock4.Unlock(&s.cm)
+ 
+ 	aPtr := &ptrScope{}
+ 	aPtr.nm = &sync.Mutex{}
+-	aPtr.nm.Lock()
+-	aPtr.nm.Unlock()
++	optiLock3.Lock(aPtr.nm)
++	optiLock3.Unlock(aPtr.nm)
+ 
+ 	mPtr := &sync.Mutex{}
+-	mPtr.Lock()
+-	mPtr.Unlock()
++	optiLock2.Lock(mPtr)
++	optiLock2.Unlock(mPtr)
+ 
+ 	a := &sync.RWMutex{}
+-	a.Lock()
+-	a.Unlock()
+-	a.RLock()
+-	a.RUnlock()
++	optiLock7.WLock(a)
++	optiLock7.WUnlock(a)
++	optiLock6.RLock(a)
++	optiLock6.RUnlock(a)
+ 
+ 	b := &sync.Mutex{}
+-	b.Lock()
+-	b.Unlock()
++	optiLock1.Lock(b)
++	optiLock1.Unlock(b)
+ }

@@ -1,0 +1,25 @@
+diff --git a/tools/gocc/testdata/test3.go b/tools/gocc/testdata/test3.go
+index 0dfd8a2..41b148f 100644
+--- a/tools/gocc/testdata/test3.go
++++ b/tools/gocc/testdata/test3.go
+@@ -9,6 +9,7 @@
+ package main
+ 
+ import (
++	rtm "github.com/uber-research/GOCC/tools/gocc/rtmlib"
+ 	"sync"
+ )
+ 
+@@ -18,9 +19,10 @@ var global int
+ // Aliasing the same lock object
+ //go:noinline
+ func aliasTest(m *sync.Mutex, n *sync.Mutex) {
+-	m.Lock()
++	optiLock1 := rtm.OptiLock{}
++	optiLock1.Lock(m)
+ 	global++
+-	n.Unlock()
++	optiLock1.Unlock(n)
+ }
+ 
+ // Aliasing the same lock object

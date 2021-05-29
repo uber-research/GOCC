@@ -1,0 +1,146 @@
+diff --git a/tools/gocc/testdata/test25.go b/tools/gocc/testdata/test25.go
+index 54a2aea..a09a01d 100644
+--- a/tools/gocc/testdata/test25.go
++++ b/tools/gocc/testdata/test25.go
+@@ -8,7 +8,10 @@
+ //limitations under the License.
+ package main
+ 
+-import "sync"
++import (
++	"sync"
++	rtm "github.com/uber-research/GOCC/tools/gocc/rtmlib"
++)
+ 
+ type x struct {
+ 	sync.Mutex
+@@ -19,84 +22,99 @@ type y struct {
+ }
+ 
+ func bar() {
++	optiLock3 := rtm.OptiLock{}
++	optiLock2 := rtm.OptiLock{}
++	optiLock1 := rtm.OptiLock{}
+ 	var xx x
+ 	func() {
+ 		func() {
+-			xx.Lock()
+-			xx.Unlock()
++			optiLock1 := rtm.OptiLock{}
++			optiLock1.Lock(&xx.Mutex)
++			optiLock1.Unlock(&xx.Mutex)
+ 		}()
+ 	}()
+ 
+ 	var yy y
+ 	func() {
+-		yy.Lock()
+-		yy.Unlock()
++		optiLock1 := rtm.OptiLock{}
++		optiLock1.Lock(yy.Mutex)
++		optiLock1.Unlock(yy.Mutex)
+ 	}()
+ 
+-	xx.Lock()
+-	xx.Unlock()
++	optiLock3.Lock(&xx.Mutex)
++	optiLock3.Unlock(&xx.Mutex)
+ 
+ 	mm := &xx
+ 	nn := &yy
+ 
+-	mm.Lock()
+-	nn.Lock()
+-	nn.Unlock()
+-	mm.Unlock()
++	optiLock2.Lock(&mm.Mutex)
++	optiLock1.Lock(nn.Mutex)
++	optiLock1.Unlock(nn.Mutex)
++	optiLock2.Unlock(&mm.Mutex)
+ }
+ 
+ func baz() {
++	optiLock3 := rtm.OptiLock{}
++	optiLock2 := rtm.OptiLock{}
++	optiLock1 := rtm.OptiLock{}
+ 	var xx sync.Mutex
+ 	func() {
+ 		func() {
+-			xx.Lock()
+-			xx.Unlock()
++			optiLock1 := rtm.OptiLock{}
++			optiLock1.Lock(&xx)
++			optiLock1.Unlock(&xx)
+ 		}()
+ 	}()
+ 
+ 	var yy sync.Mutex
+ 	func() {
+-		yy.Lock()
+-		yy.Unlock()
++		optiLock1 := rtm.OptiLock{}
++		optiLock1.Lock(&yy)
++		optiLock1.Unlock(&yy)
+ 	}()
+ 
+-	xx.Lock()
+-	xx.Unlock()
++	optiLock3.Lock(&xx)
++	optiLock3.Unlock(&xx)
+ 
+ 	mm := &xx
+ 	nn := &yy
+ 
+-	mm.Lock()
+-	nn.Lock()
+-	nn.Unlock()
+-	mm.Unlock()
++	optiLock2.Lock(mm)
++	optiLock1.Lock(nn)
++	optiLock1.Unlock(nn)
++	optiLock2.Unlock(mm)
+ }
+ 
+ func ban() {
++	optiLock3 := rtm.OptiLock{}
++	optiLock2 := rtm.OptiLock{}
++	optiLock1 := rtm.OptiLock{}
+ 	xx := &sync.Mutex{}
+ 	func() {
+ 		func() {
+-			xx.Lock()
+-			xx.Unlock()
++			optiLock1 := rtm.OptiLock{}
++			optiLock1.Lock(xx)
++			optiLock1.Unlock(xx)
+ 		}()
+ 	}()
+ 
+ 	yy := &sync.Mutex{}
+ 	func() {
+-		yy.Lock()
+-		yy.Unlock()
++		optiLock1 := rtm.OptiLock{}
++		optiLock1.Lock(yy)
++		optiLock1.Unlock(yy)
+ 	}()
+ 
+-	xx.Lock()
+-	xx.Unlock()
++	optiLock3.Lock(xx)
++	optiLock3.Unlock(xx)
+ 
+ 	mm := xx
+ 	nn := yy
+ 
+-	mm.Lock()
+-	nn.Lock()
+-	nn.Unlock()
+-	mm.Unlock()
++	optiLock2.Lock(mm)
++	optiLock1.Lock(nn)
++	optiLock1.Unlock(nn)
++	optiLock2.Unlock(mm)
+ }
+ func foo() {
+ }

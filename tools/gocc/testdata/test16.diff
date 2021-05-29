@@ -1,0 +1,24 @@
+diff --git a/tools/gocc/testdata/test16.go b/tools/gocc/testdata/test16.go
+index 147545e..5bc9d54 100644
+--- a/tools/gocc/testdata/test16.go
++++ b/tools/gocc/testdata/test16.go
+@@ -8,12 +8,16 @@
+ //limitations under the License.
+ package main
+ 
+-import "sync"
++import (
++	"sync"
++	rtm "github.com/uber-research/GOCC/tools/gocc/rtmlib"
++)
+ 
+ func foo(m, n *sync.Mutex) {
++	optiLock1 := rtm.OptiLock{}
+ 	m.Lock()
+-	n.Lock()
+-	m.Unlock()
++	optiLock1.Lock(n)
++	optiLock1.Unlock(m)
+ 	n.Unlock()
+ }
+ 

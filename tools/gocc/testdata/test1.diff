@@ -1,0 +1,23 @@
+diff --git a/tools/gocc/testdata/test1.go b/tools/gocc/testdata/test1.go
+index 003ece9..4bd65c0 100644
+--- a/tools/gocc/testdata/test1.go
++++ b/tools/gocc/testdata/test1.go
+@@ -9,6 +9,7 @@
+ package main
+ 
+ import (
++	rtm "github.com/uber-research/GOCC/tools/gocc/rtmlib"
+ 	"sync"
+ )
+ 
+@@ -16,7 +17,8 @@ var m sync.Mutex
+ var global int
+ 
+ func main() {
+-	m.Lock()
++	optiLock1 := rtm.OptiLock{}
++	optiLock1.Lock(&m)
+ 	global++
+-	m.Unlock()
++	optiLock1.Unlock(&m)
+ }
