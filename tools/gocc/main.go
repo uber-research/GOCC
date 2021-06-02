@@ -264,7 +264,7 @@ func (g *gocc) buildCG() {
 	for _, pkg := range g.pkgs {
 		g.pkgName[pkg.Name] = emptyStruct
 	}
-	g.prog, g.ssapkgs = ssautil.AllPackages(g.pkgs /*ssa.BuilderMode(0)*/, ssa.NaiveForm|ssa.GlobalDebug)
+	g.prog, g.ssapkgs = ssautil.AllPackages(g.pkgs /*ssa.BuilderMode(0)*/, ssa.GlobalDebug)
 	libbuilder.BuildPackages(g.prog, g.ssapkgs, true, true)
 	g.cg = libcg.BuildRtaCG(g.prog, true)
 }
