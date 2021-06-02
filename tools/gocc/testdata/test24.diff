@@ -1,5 +1,5 @@
 diff --git a/tools/gocc/testdata/test24.go b/tools/gocc/testdata/test24.go
-index 5355977..de736d0 100644
+index 5355977..7d708e0 100644
 --- a/tools/gocc/testdata/test24.go
 +++ b/tools/gocc/testdata/test24.go
 @@ -8,14 +8,18 @@
@@ -19,8 +19,8 @@ index 5355977..de736d0 100644
  	m[0].Lock()
 -	m[1].Lock()
 -	m[0].Unlock()
-+	optiLock1.Lock(m[1])
-+	optiLock1.Unlock(m[0])
++	optiLock1.Lock(&m[1])
++	optiLock1.Unlock(&m[0])
  	m[1].Unlock()
  }
  
