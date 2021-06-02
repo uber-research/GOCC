@@ -36,7 +36,7 @@ func safeVariableName(oldName string) string {
 func main() {
 	// command-line argument
 	var inputFile string
-	flag.StringVar(&inputFile, "input", "", "source file to analyze")
+	flag.StringVar(&inputFile, "input", "", "source dir to analyze")
 
 	flag.Parse()
 
