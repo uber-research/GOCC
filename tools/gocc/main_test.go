@@ -10,12 +10,16 @@ package main
 
 import (
 	"io/ioutil"
+	"os"
 	"os/exec"
 	"regexp"
 	"strconv"
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"golang.org/x/tools/go/packages"
+	"golang.org/x/tools/go/ssa"
+	"golang.org/x/tools/go/ssa/ssautil"
 )
 
 func TestPkgs(t *testing.T) {
@@ -36,7 +40,6 @@ func TestPkgs(t *testing.T) {
 			diffFile:    "testdata/tally.diff",
 			rewriteTest: false,
 		},
-
 		{
 			loc:      "./testdata/src/go.uber.org/zap",
 			name:     "zap",
@@ -85,7 +88,6 @@ func TestPkgs(t *testing.T) {
 		}()
 		g := NewGOCC(false, tc.rewriteTest, false, true, false, tc.loc)
 		g.Process()
-
 		// Get diff
 		cmd := []string{"git", "diff", tc.loc}
 		diff, _ := exec.Command(cmd[0], cmd[1:]...).Output()
@@ -104,5 +106,26 @@ func TestPkgs(t *testing.T) {
 		//	fmt.Printf("recordedDiffStr = %s\n", recordedDiffStr)
 
 		require.Equal(t, recordedDiffStr, diffStr)
+		// Must build after edits
+
+		pkgConfig := &packages.Config{Mode: packages.LoadAllSyntax, Tests: true}
+		loadPath := tc.loc
+		if info, err := os.Stat(loadPath); err == nil && info.IsDir() {
+			loadPath += "/."
+		}
+		initial, err := packages.Load(pkgConfig, loadPath)
+		require.NoError(t, err)
+		if packages.PrintErrors(initial) > 0 {
+			require.Fail(t, "packages contain errors")
+		}
+		// Create SSA packages for all well-typed packages.
+		prog, pkgs := ssautil.Packages(initial, ssa.GlobalDebug)
+		_ = prog
+		// Build SSA code for the well-typed initial packages.
+		for _, p := range pkgs {
+			if p != nil {
+				p.Build()
+			}
+		}
 	}
 }
