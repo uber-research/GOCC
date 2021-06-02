@@ -25,10 +25,6 @@ import (
 	"golang.org/x/tools/go/packages"
 )
 
-// this map will mark which lock position and paths are in lambda function
-// since it will have different namescope
-//var _lockInLambdaFunc map[token.Pos]bool
-
 const _rtmLibPath = "github.com/uber-research/GOCC/tools/gocc/rtmlib"
 
 type luConsts struct {
@@ -51,6 +47,7 @@ var luTypeToStr [TYPE_MAX]luConsts = [TYPE_MAX]luConsts{
 	UNKNOWN:       luConsts{},
 }
 
+// ensureMethodMatch checks if the AST node matches with the function name recorded at the SSA-level.
 func ensureMethodMatch(sel *ast.SelectorExpr, lup *luPoint) bool {
 	if sel.Sel.Name == luTypeToStr[lup.luType()].method {
 		return true
@@ -58,31 +55,7 @@ func ensureMethodMatch(sel *ast.SelectorExpr, lup *luPoint) bool {
 	return false
 }
 
-func isPromotedField(e ast.Expr, typesMap map[ast.Expr]types.TypeAndValue) bool {
-	if v, ok := typesMap[e]; ok {
-		switch v.Type.String() {
-		case "*sync.Mutex", "sync.Mutex", "*sync.RWMutex", "sync.RWMutex":
-			return false
-		default:
-			return true
-		}
-	}
-	panic("Not present in typesMap!")
-}
-
-func isPointerToMutex(e ast.Expr, typesMap map[ast.Expr]types.TypeAndValue) bool {
-	if v, ok := typesMap[e]; ok {
-		switch v.Type.String() {
-		case "*sync.Mutex", "*sync.RWMutex":
-			return true
-		default:
-			return false
-		}
-	}
-	panic("Not present in typesMap!")
-}
-
-// adds context variable definition at the beginning of the function's statement list
+// insertOptiLockDecl adds optiLock variable definition at the beginning of the function's statement list.
 func insertOptiLockDecl(stmtsList *[]ast.Stmt, sigPos token.Pos, count map[int]empty) {
 	// Get sorted count for stable diff
 	countSorted := make([]int, len(count))
@@ -106,6 +79,8 @@ func insertOptiLockDecl(stmtsList *[]ast.Stmt, sigPos token.Pos, count map[int]e
 	}
 }
 
+// isPromotedOrPointer returns whether the AST expression is working on a promoted fields of a struct
+// and whether the Mutex is a value or a pointer type.
 func isPromotedOrPointer(e ast.Expr, typesMap map[ast.Expr]types.TypeAndValue) (bool, bool) {
 
 	// sync.Mutex/sync.RWMutex => non promoted, non pointer
@@ -255,9 +230,6 @@ func processASTFile(pkg *packages.Package, file *ast.File, luPairs []*luPair) (m
 func nearestFunctionDecl(pt *luPoint) *ast.FuncDecl {
 	for i := 0; i < len(pt.astPath); i++ {
 		if _, ok := pt.astPath[i].(*ast.BlockStmt); ok {
-			/* TODO: can't find Name if blk.Name() != "Body" {
-				continue
-			} */
 			if i+1 < len(pt.astPath) {
 				if decl, ok := pt.astPath[i+1].(*ast.FuncDecl); ok {
 					return decl
@@ -267,12 +239,10 @@ func nearestFunctionDecl(pt *luPoint) *ast.FuncDecl {
 	}
 	return nil
 }
+
 func nearestFunctionLit(pt *luPoint) *ast.FuncLit {
 	for i := 0; i < len(pt.astPath); i++ {
 		if _, ok := pt.astPath[i].(*ast.BlockStmt); ok {
-			/* TODO: can't find Name if blk.Name() != "Body" {
-				continue
-			} */
 			if i+1 < len(pt.astPath) {
 				if lit, ok := pt.astPath[i+1].(*ast.FuncLit); ok {
 					return lit
@@ -290,7 +260,6 @@ func (g *gocc) transform() {
 			if g.rewriteTestFile == false {
 				fName := pkg.Fset.Position(file.Pos()).Filename
 				if strings.HasSuffix(fName, "_test.go") {
-					// fmt.Printf("%v is skipped since it is a testing file\n", fName)
 					continue
 				}
 			}

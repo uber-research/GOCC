@@ -12,6 +12,7 @@ import (
 	"golang.org/x/tools/go/ssa"
 )
 
+// getLUPoint retuns an luPoint if the call is acting on a Mutex/RWMutex type.
 func getLUPoint(call ssa.CallCommon, isADefer bool) *luPoint {
 	if call.IsInvoke() {
 		return nil
@@ -60,6 +61,7 @@ func createLUPoint(ins ssa.Instruction) *luPoint {
 	return nil
 }
 
+// gatherLUPoints fetches all LUPoints in a function.
 func gatherLUPoints(f *ssa.Function) (map[*luPoint]ssa.Instruction, map[ssa.Instruction]*luPoint) {
 	if f == nil {
 		return nil, nil

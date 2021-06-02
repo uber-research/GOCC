@@ -36,6 +36,7 @@ const (
 )
 const _intMax = int(^uint(0) >> 1)
 
+// luPoint is a key data structure that holds information about a location (LUPoint) where Lock/Unlock is performed.
 type luPoint struct {
 	astPath     []ast.Node
 	ssaIns      ssa.Instruction
@@ -49,11 +50,12 @@ type luPoint struct {
 	isLambda    bool
 }
 
+// luPair is a pair of LUpoints where one is a Lock point and another is an Unlock point.
 type luPair struct {
-	l *luPoint
-	u *luPoint
-	r map[*ssa.BasicBlock]empty
-	f *ssa.Function
+	l *luPoint                  // Lock point
+	u *luPoint                  // Unlock point
+	r map[*ssa.BasicBlock]empty // the region covered by lock-unlock
+	f *ssa.Function             // the enclosing function
 }
 
 func (lup *luPair) lPoint() *luPoint {
@@ -68,6 +70,7 @@ func (lup *luPair) region() map[*ssa.BasicBlock]empty {
 	return lup.r
 }
 
+// dfsRechableFunctions returns the transitive closure of the functions reachable from root (mutates reachable).
 func dfsRechableFunctions(root *ssa.Function, reachable map[*ssa.Function]empty, cg map[*ssa.Function]*callgraph.Node) {
 	if _, ok := reachable[root]; ok {
 		return
@@ -82,6 +85,12 @@ func dfsRechableFunctions(root *ssa.Function, reachable map[*ssa.Function]empty,
 	}
 }
 
+// checkRegionSafety returns true if the region covered by lup has
+// a. no HTM unfit instruction.
+// b. no other lock/unlock operations that alias with lup in the region.
+// c. The transitive closure of the functions calls in the region contains no HTM unfit instructons.
+// d. The transitive closure of the functions calls have no lock/unlock operations that alias with lup in the region.
+// Returns false otherwise.
 func (lup *luPair) checkRegionSafety(f *ssa.Function, summary map[*ssa.Function]*functionSummary, cg map[*ssa.Function]*callgraph.Node) bool {
 	sefSummary := summary[f]
 	cgNode, ok := cg[f]
@@ -90,6 +99,7 @@ func (lup *luPair) checkRegionSafety(f *ssa.Function, summary map[*ssa.Function]
 	}
 
 	callSites := map[ssa.CallInstruction]empty{}
+	// first do region-level analysis.
 	for b, _ := range lup.r {
 		// first, the block should have NO block-listed calls
 		// second, the block should contain NO LUpoint that intersects with this LU-pair.
@@ -175,6 +185,7 @@ func blocksReachable(b *ssa.BasicBlock, reachable map[*ssa.BasicBlock]empty) {
 	}
 }
 
+// enclosedRegion prepares a map of basic blocks that are dominated by l point and post dominated by u point.
 func enclosedRegion(l *luPoint, u *luPoint) map[*ssa.BasicBlock]empty {
 	dummyBB := ssa.BasicBlock{}
 	if u.isDefer() {
@@ -324,6 +335,7 @@ func (l *luPoint) index() int {
 	return l.insIdx
 }
 
+// blockToLockPointDescending orders lPoints belonging to each basic block by descending order of their instructions in the block (post order by dominance).
 func blockToLockPointDescending(lPoints map[*luPoint]ssa.Instruction) map[*ssa.BasicBlock][]*luPoint {
 	blockToLpt := make(map[*ssa.BasicBlock][]*luPoint)
 
@@ -343,6 +355,7 @@ func blockToLockPointDescending(lPoints map[*luPoint]ssa.Instruction) map[*ssa.B
 	return blockToLpt
 }
 
+// blockToUnlockPointMapAscending orders uPoints belonging to each basic block by ascending order of their instructions in the block (pre order by dominance).
 func blockToUnlockPointMapAscending(uPoints map[*luPoint]ssa.Instruction) map[*ssa.BasicBlock][]*luPoint {
 	blockToUpt := make(map[*ssa.BasicBlock][]*luPoint)
 
@@ -362,6 +375,7 @@ func blockToUnlockPointMapAscending(uPoints map[*luPoint]ssa.Instruction) map[*s
 	return blockToUpt
 }
 
+// orderLocksByPostOrderInDomtree orders all lPoints in post order to help visit inside out.
 func orderLocksByPostOrderInDomtree(f *ssa.Function, lPoints map[*luPoint]ssa.Instruction) []*luPoint {
 	postOrderDomTree := f.DomPostorder()
 	blockToLUPt := blockToLockPointDescending(lPoints)
@@ -377,6 +391,7 @@ func orderLocksByPostOrderInDomtree(f *ssa.Function, lPoints map[*luPoint]ssa.In
 	return postOrderlPoints
 }
 
+// nearestIntersectingUnlock finds the nearest unlock point for a given lock point.
 func nearestIntersectingUnlock(l *luPoint, pdom *ssa.BasicBlock, ups map[*ssa.BasicBlock][]*luPoint, alreadyMatched map[*luPoint]empty) (*luPoint, bool) {
 	uPoints, ok := ups[pdom]
 	if !ok {
@@ -409,6 +424,7 @@ func nearestIntersectingUnlock(l *luPoint, pdom *ssa.BasicBlock, ups map[*ssa.Ba
 	return nil, false
 }
 
+// nearestIntersectingDeferUnlockBeforeLock finds the nearest defer unlock point for a given lock point.
 func nearestIntersectingDeferUnlockBeforeLock(l *luPoint, dom *ssa.BasicBlock, d map[*ssa.BasicBlock][]*luPoint, alreadyMatched map[*luPoint]empty) (*luPoint, bool) {
 	uPoints, ok := d[dom]
 	if !ok {
@@ -440,6 +456,7 @@ func nearestIntersectingDeferUnlockBeforeLock(l *luPoint, dom *ssa.BasicBlock, d
 	return nil, false
 }
 
+// getNearestUpoint finds the nearest defer unlock point (defer or otherwise) for a given lock point.
 func getNearestUpoint(l *luPoint, ups map[*ssa.BasicBlock][]*luPoint, dups map[*ssa.BasicBlock][]*luPoint, alreadyMatched map[*luPoint]empty) *luPoint {
 	// Following situations arise.
 	// 1. a uPoint() post-dominates l or
@@ -676,8 +693,10 @@ func (s *functionSummary) updateMetrics(candidates [3]int, pairsNonDefer [3]int,
 
 }
 
+// collectLUPairs visits all lock points in a post order and matches the nearest (defer) unlock if there is one.
+// The match must ensure dominance/post dominance condition and aliasing of the lock and unlock points and there must not
+// exist another lock/unlock point aliasing the same mutex that the lock/unlock act on.
 func collectLUPairs(f *ssa.Function, funcSummaryMap map[*ssa.Function]*functionSummary, cg map[*ssa.Function]*callgraph.Node) []*luPair {
-
 	summary, ok := funcSummaryMap[f]
 	if !ok {
 		panic("funcSummaryMap[f] failed!")

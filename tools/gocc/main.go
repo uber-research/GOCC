@@ -26,12 +26,14 @@ import (
 // TODO: manual SSA to detect a unique name for the majic lock
 const _optiLockName = "optiLock"
 
-// generate the name of the packages that violates HTM
-//var _blockList []string = []string{"os.", "io.", "fmt.", "runtime.", "syscall."}
-//var _blockedPkg []string = []string{"os", "io", "fmt", "runtime", "syscall"}
-
+// Packages that are not condusive for HTM.
 var _blockList []string = []string{"os.", "io.", "fmt.", "runtime.", "syscall."}
 var _blockedPkg []string = []string{"os", "io", "fmt", "runtime", "syscall"}
+
+// GOCC processes a Go package and rewrites Lock/Unlock with HTM.
+type GOCC interface {
+	Process()
+}
 
 type gocc struct {
 	mPkg            map[string]int
@@ -58,7 +60,8 @@ type gocc struct {
 	dryrun          bool
 }
 
-func NewGOCC(isSingleFile bool, rewriteTestFile bool, synthetic bool, verbose bool, dryrun bool, inputFile string) *gocc {
+// NewGOCC returns a new GOCC.
+func NewGOCC(isSingleFile bool, rewriteTestFile bool, synthetic bool, verbose bool, dryrun bool, inputFile string) GOCC {
 	return &gocc{
 		mPkg:            make(map[string]int),
 		lockAliasMap:    make(map[ssa.Value][]ssa.Value),
@@ -143,7 +146,7 @@ func checkBlockListStr(pkg *ssa.Package) bool {
 	return false
 }
 
-// TODO: This is not correct.
+// TODO: This is not 100% perfect.
 // In reality, we should check all callees of f, and disqualify it if we see calls to an unwanted function.
 // For example, see lib/callgraph/builtin.go  for the set of build-in functions called, which do NOT emerge from a call instruction.
 // For simplicity, we inspect only the call instructions and mark the calls to certain packages (fmt, io, runtime, ...) as unsafe.
@@ -245,9 +248,6 @@ func (g *gocc) collectAllLUPairs() {
 		if !g.isHotFunction(f) {
 			continue
 		}
-		//		if f.Name() == "Counter" /*|| f.Name() == "foo" || f.Name() == "bax" */ {
-		//			fmt.Println("..")
-		//		}
 		pairs := collectLUPairs(f, g.funcSummaryMap, g.cg.Nodes)
 		g.luPairs = append(g.luPairs, pairs...)
 	}
@@ -320,9 +320,6 @@ func (g *gocc) Process() {
 	}
 
 	g.buildCG()
-
-	// TODO: first pass on optimized form and second pass on naive form to check if it is a value or object
-
 	g.collectAllLUPoints()
 	// Do alias analysis
 	g.collectPointsToSet()
@@ -337,8 +334,6 @@ func (g *gocc) Process() {
 	g.annotateLambda()
 	g.collectAllLUPairs()
 	log.Printf("total luPairs = %d", len(g.luPairs))
-	// order by package
-
 	g.dumpInfo()
 	dumpMetrics(g.funcSummaryMap)
 	g.transform()
@@ -358,7 +353,7 @@ func main() {
 	if inputFile == "" {
 		fmt.Println("Please provide the input!")
 		flag.PrintDefaults()
-		os.Exit(1)
+		log.Fatalf("No input file/dir to build.")
 	}
 
 	gizer := NewGOCC(strings.HasSuffix(inputFile, ".go"), *rewriteTestFile, *syntheticPtr, *verbose, *dryrunPtr, inputFile)
