@@ -15,6 +15,7 @@ import (
 	"go/format"
 	"go/token"
 	"go/types"
+	"log"
 	"os"
 	"sort"
 	"strconv"
@@ -69,6 +70,18 @@ func isPromotedField(e ast.Expr, typesMap map[ast.Expr]types.TypeAndValue) bool 
 	panic("Not present in typesMap!")
 }
 
+func isPointerToMutex(e ast.Expr, typesMap map[ast.Expr]types.TypeAndValue) bool {
+	if v, ok := typesMap[e]; ok {
+		switch v.Type.String() {
+		case "*sync.Mutex", "*sync.RWMutex":
+			return true
+		default:
+			return false
+		}
+	}
+	panic("Not present in typesMap!")
+}
+
 // adds context variable definition at the beginning of the function's statement list
 func insertOptiLockDecl(stmtsList *[]ast.Stmt, sigPos token.Pos, count map[int]empty) {
 	// Get sorted count for stable diff
@@ -91,6 +104,53 @@ func insertOptiLockDecl(stmtsList *[]ast.Stmt, sigPos token.Pos, count map[int]e
 		newStmtsList = append(newStmtsList, (*stmtsList)...)
 		*stmtsList = newStmtsList
 	}
+}
+
+func isPromotedOrPointer(e ast.Expr, typesMap map[ast.Expr]types.TypeAndValue) (bool, bool) {
+
+	// sync.Mutex/sync.RWMutex => non promoted, non pointer
+	// *sync.Mutex/*sync.RWMutex => non promoted, pointer
+	// otherwise,
+	// Strutct => fetch the fields and on each "embedded" field, apply the same logic.
+	// Pointer => get the Elem() and apply the logic
+	// Named => get the Underlying() and apply the logic
+
+	if v, ok := typesMap[e]; ok {
+		switch v.Type.String() {
+		case "*sync.Mutex", "*sync.RWMutex":
+			return false, true
+		case "sync.Mutex", "sync.RWMutex":
+			return false, false
+		default:
+
+			curType := v.Type.Underlying()
+			for {
+				switch t := curType.(type) {
+				case *types.Struct:
+					// log.Printf("%v is a *types.Struct\n", t)
+					for i := 0; i < t.NumFields(); i++ {
+						if t.Field(i).IsField() && t.Field(i).Embedded() {
+							switch t.Field(i).Type().String() {
+							case "*sync.Mutex", "*sync.RWMutex":
+								return true, true
+							case "sync.Mutex", "sync.RWMutex":
+								return true, false
+							}
+						}
+					}
+					log.Fatalf("Not fields in %v", t)
+				case *types.Pointer:
+					// log.Printf("%v is a *types.Pointer and Elem()=%v\n", t, t.Elem())
+					curType = t.Elem()
+				case *types.Named:
+					// log.Printf("%v is a *types.Named and Underlying()=%v\n", t, t.Underlying())
+					curType = t.Underlying()
+				}
+			}
+		}
+	}
+	log.Fatalf("type %e not found in typemap", e)
+	panic("does not reach")
 }
 
 func processASTFile(pkg *packages.Package, file *ast.File, luPairs []*luPair) (map[ast.Node]*luPoint, map[*ast.CallExpr]*ast.CallExpr, map[*ast.FuncDecl]map[int]empty, map[*ast.FuncLit]map[int]empty) {
@@ -133,14 +193,17 @@ func processASTFile(pkg *packages.Package, file *ast.File, luPairs []*luPair) (m
 			}
 
 			theExpression := se.X
-			if isPromotedField(theExpression, typesMap) {
+
+			promoted, pointer := isPromotedOrPointer(theExpression, typesMap)
+
+			if promoted {
 				theExpression = &ast.SelectorExpr{
 					X:   theExpression,
 					Sel: ast.NewIdent(pt.getPromotedIdentifier()),
 				}
 			}
 
-			if pt.isPointer {
+			if !pointer {
 				theExpression = &ast.UnaryExpr{
 					Op: token.AND,
 					X:  theExpression,
