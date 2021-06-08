@@ -11,6 +11,6 @@ func foo(m *sync.Mutex, u func()) {
 func main() {
 	var m sync.Mutex
 	i := 0
-	u := func() {i++}
+	u := func() { i++ }
 	foo(&m, u)
 }
