@@ -2,14 +2,12 @@ package main
 
 import (
 	"sync"
-	rtm "github.com/uber-research/GOCC/tools/gocc/rtmlib"
 )
 
 func foo(m *sync.Mutex, u func()) {
-	optiLock1 := rtm.OptiLock{}
-	optiLock1.Lock(m)
+	m.Lock()
 	u()
-	optiLock1.Unlock(m)
+	m.Unlock()
 }
 
 func main() {
