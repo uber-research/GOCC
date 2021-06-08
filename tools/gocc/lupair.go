@@ -31,6 +31,7 @@ const (
 	RLOCK                     = iota
 	RUNLOCK                   = iota
 	DEFER_RUNLOCK             = iota
+	MULTIPLE                  = iota
 	UNKNOWN                   = iota
 	TYPE_MAX                  = iota
 )
@@ -38,16 +39,18 @@ const _intMax = int(^uint(0) >> 1)
 
 // luPoint is a key data structure that holds information about a location (LUPoint) where Lock/Unlock is performed.
 type luPoint struct {
-	astPath     []ast.Node
-	ssaIns      ssa.Instruction
-	callC       ssa.CallCommon
-	insIdx      int
-	pointerInfo pointer.Pointer
-	kind        luPointType
-	mutexVal    ssa.Value
-	isPointer   bool
-	idInFunc    int
-	isLambda    bool
+	astPath           []ast.Node
+	ssaIns            ssa.Instruction
+	callC             ssa.CallCommon
+	insIdx            int
+	pointerInfo       []pointer.Pointer
+	kind              luPointType
+	mutexVal          ssa.Value
+	indirectMutexVals []ssa.Value
+	isPointer         bool
+	idInFunc          int
+	isLambda          bool
+	isDynamic         bool
 }
 
 // luPair is a pair of LUpoints where one is a Lock point and another is an Unlock point.
@@ -267,12 +270,20 @@ func (p *luPoint) mutexValue() ssa.Value {
 	return p.callC.Args[0]
 }
 
-func (l *luPoint) pointsToSet() pointer.PointsToSet {
-	return l.pointerInfo.PointsTo()
+func (l *luPoint) pointsToSet() []pointer.PointsToSet {
+	pts := []pointer.PointsToSet{}
+	for _, p := range l.pointerInfo {
+		pts = append(pts, p.PointsTo())
+	}
+	return pts
 }
 
-func (l *luPoint) setAliasingPointer(p pointer.Pointer) {
-	l.pointerInfo = p
+func (l *luPoint) appendToAliasingPointer(p pointer.Pointer) {
+	if !l.isDynamic && len(l.pointerInfo) != 0 {
+		panic("should not append to static callee more than one time.")
+	}
+
+	l.pointerInfo = append(l.pointerInfo, p)
 }
 
 func (l *luPoint) call() ssa.CallCommon {
@@ -280,8 +291,18 @@ func (l *luPoint) call() ssa.CallCommon {
 }
 
 func (l *luPoint) nilLabels(u *luPoint) bool {
-	a := l.pointerInfo.PointsTo().Labels()
-	b := u.pointerInfo.PointsTo().Labels()
+
+	a := []*pointer.Label{}
+	b := []*pointer.Label{}
+
+	for _, p := range l.pointerInfo {
+		a = append(a, p.PointsTo().Labels()...)
+	}
+
+	for _, q := range u.pointerInfo {
+		b = append(a, q.PointsTo().Labels()...)
+	}
+
 	if len(a) == 0 && len(b) == 0 {
 		return true
 	}
@@ -312,7 +333,14 @@ func (l *luPoint) mayBeSameMutexNilsAreSame(u *luPoint) bool {
 }
 
 func (l *luPoint) mayBeSameMutex(u *luPoint) bool {
-	return l.pointerInfo.PointsTo().Intersects(u.pointerInfo.PointsTo())
+	for _, p := range l.pointerInfo {
+		for _, q := range u.pointerInfo {
+			if p.PointsTo().Intersects(q.PointsTo()) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (l *luPoint) getOptiMethod() string {
@@ -550,7 +578,7 @@ type groupOps struct {
 }
 
 // collect all locks and unlocks in the function
-func groupByKind(ptInsMap map[*luPoint]ssa.Instruction) (*groupOps, *groupOps, *groupOps) {
+func groupByKind(ptInsMap map[*luPoint]ssa.Instruction) (*groupOps, *groupOps, *groupOps, map[*luPoint]ssa.Instruction) {
 
 	m := groupOps{
 		l: make(map[*luPoint]ssa.Instruction),
@@ -569,6 +597,8 @@ func groupByKind(ptInsMap map[*luPoint]ssa.Instruction) (*groupOps, *groupOps, *
 		u: make(map[*luPoint]ssa.Instruction),
 		d: make(map[*luPoint]ssa.Instruction),
 	}
+
+	misc := make(map[*luPoint]ssa.Instruction)
 
 	for k, v := range ptInsMap {
 		switch k.luType() {
@@ -592,38 +622,44 @@ func groupByKind(ptInsMap map[*luPoint]ssa.Instruction) (*groupOps, *groupOps, *
 			w.u[k] = v
 		case DEFER_WUNLOCK:
 			w.d[k] = v
+		case MULTIPLE:
+			misc[k] = v
 		default:
 			panic("unknown luPointType")
 		}
 	}
-	return &m, &r, &w
+	return &m, &r, &w, misc
 }
 
-func collectLUPoints(f *ssa.Function) (*groupOps, *groupOps, *groupOps, map[*luPoint]ssa.Instruction, map[ssa.Instruction]*luPoint) {
-	ptInsMap, insPtMap := gatherLUPoints(f)
-	m, r, w := groupByKind(ptInsMap)
-	return m, r, w, ptInsMap, insPtMap
+func (g *gocc) collectLUPoints(f *ssa.Function) (*groupOps, *groupOps, *groupOps, map[*luPoint]ssa.Instruction, map[*luPoint]ssa.Instruction, map[ssa.Instruction]*luPoint) {
+	ptInsMap, insPtMap := g.gatherLUPoints(f)
+	m, r, w, misc := groupByKind(ptInsMap)
+	return m, r, w, misc, ptInsMap, insPtMap
 }
 
 type functionSummary struct {
-	f               *ssa.Function
-	numDefers       int
-	numDeferUnlocks int
-	safe            bool
-	pointsTo        []pointer.PointsToSet
-	ptToIns         map[*luPoint]ssa.Instruction
-	insToPt         map[ssa.Instruction]*luPoint
-	isLambda        bool
-	m               *groupOps
-	r               *groupOps
-	w               *groupOps
-	metric          metrics
+	f                *ssa.Function
+	numDefers        int
+	numIndirectCalls int
+	numDeferUnlocks  int
+	safe             bool
+	pointsTo         []pointer.PointsToSet
+	ptToIns          map[*luPoint]ssa.Instruction
+	insToPt          map[ssa.Instruction]*luPoint
+	isLambda         bool
+	m                *groupOps
+	r                *groupOps
+	w                *groupOps
+	misc             map[*luPoint]ssa.Instruction
+	metric           metrics
 }
 
 func (f *functionSummary) mayAlias(l *luPoint) bool {
 	for _, v := range f.pointsTo {
-		if v.Intersects(l.pointsToSet()) {
-			return true
+		for _, p := range l.pointsToSet() {
+			if v.Intersects(p) {
+				return true
+			}
 		}
 	}
 	return false
@@ -665,7 +701,10 @@ func (s *functionSummary) compute(cgNode *callgraph.Node) {
 		if k.isDefer() {
 			s.numDeferUnlocks++
 		}
-		s.pointsTo = append(s.pointsTo, k.pointsToSet())
+		if k.isDynamic {
+			s.numIndirectCalls++
+		}
+		s.pointsTo = append(s.pointsTo, k.pointsToSet()...)
 	}
 }
 

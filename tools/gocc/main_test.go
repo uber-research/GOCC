@@ -65,7 +65,7 @@ func TestPkgs(t *testing.T) {
 	}
 
 	ignoreTestId := map[int]empty{15: emptyStruct}
-	for i := 1; i <= 26; i++ {
+	for i := 1; i <= 31; i++ {
 		if _, ok := ignoreTestId[i]; ok {
 			continue
 		}

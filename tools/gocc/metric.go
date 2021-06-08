@@ -27,6 +27,8 @@ type metrics struct {
 	rUnlock      int
 	rDeferUnlock int
 
+	indirectCalls int
+
 	pairedMlock int
 	pairedWlock int
 	pairedRlock int
@@ -58,6 +60,8 @@ func (m *metrics) sum(a metrics) {
 	m.rLock += a.rLock
 	m.rUnlock += a.rUnlock
 	m.rDeferUnlock += a.rDeferUnlock
+
+	m.indirectCalls += a.indirectCalls
 
 	m.pairedMlock += a.pairedMlock
 	m.pairedWlock += a.pairedWlock
@@ -97,7 +101,7 @@ func dumpMetrics(s map[*ssa.Function]*functionSummary) {
 	}
 
 	var totalMutex, totalW, totalR, totralRW, nonDeferPair, deferPair, totalPair int
-	fmt.Printf("\npkg,mLock,mUnlock,mDeferUnlock,sync.Mutex,wLock,wUnlock,wDeferUnlock,RWMutex+W,rLock,rUnlock,rDeferUnlock,RWMutex+R,RWMutex,candidateMutex,candidateWMutex,candidateRutex,pairedMlock,pairedWlock,pairedRlock,Paired(nondefer),pairedMDeferlock,pairedWDeferlock,pairedRDeferlock,Paired(defer),Paired(total),intraRegionIO,interRegionIO,intraRegionAlias,interRegionAlias,dominaceRelation\n")
+	fmt.Printf("\npkg,mLock,mUnlock,mDeferUnlock,sync.Mutex,wLock,wUnlock,wDeferUnlock,RWMutex+W,rLock,rUnlock,rDeferUnlock,RWMutex+R,RWMutex,indirectCalls,candidateMutex,candidateWMutex,candidateRutex,pairedMlock,pairedWlock,pairedRlock,Paired(nondefer),pairedMDeferlock,pairedWDeferlock,pairedRDeferlock,Paired(defer),Paired(total),intraRegionIO,interRegionIO,intraRegionAlias,interRegionAlias,dominaceRelation\n")
 	for k, m := range packageMetrics {
 		mutex := m.mLock + m.mUnlock + m.mDeferUnlock
 		totalMutex += mutex
@@ -112,10 +116,11 @@ func dumpMetrics(s map[*ssa.Function]*functionSummary) {
 		lDefPair := m.pairedMDeferlock + m.pairedWDeferlock + m.pairedRDeferlock
 		deferPair += lDefPair
 		totalPair += lDefPair + lnonDeferPair
-		fmt.Printf("%s, %d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\n", k,
+		fmt.Printf("%s, %d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\n", k,
 			m.mLock, m.mUnlock, m.mDeferUnlock, mutex,
 			m.wLock, m.wUnlock, m.wDeferUnlock, wMutex,
 			m.rLock, m.rUnlock, m.rDeferUnlock, rMutex, rMutex+wMutex,
+			m.indirectCalls,
 			m.candidateMutex, m.candidateWMutex, m.candidateRMutex,
 			m.pairedMlock, m.pairedWlock, m.pairedRlock, lnonDeferPair,
 			m.pairedMDeferlock, m.pairedWDeferlock, m.pairedRDeferlock, lDefPair, lDefPair+lnonDeferPair,
@@ -123,10 +128,11 @@ func dumpMetrics(s map[*ssa.Function]*functionSummary) {
 	}
 
 	m := totalMetric
-	fmt.Printf("%s,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\n", "total",
+	fmt.Printf("%s,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\n", "total",
 		m.mLock, m.mUnlock, m.mDeferUnlock, totalMutex,
 		m.wLock, m.wUnlock, m.wDeferUnlock, totalW,
 		m.rLock, m.rUnlock, m.rDeferUnlock, totalR, totralRW,
+		m.indirectCalls,
 		m.candidateMutex, m.candidateWMutex, m.candidateRMutex,
 		m.pairedMlock, m.pairedWlock, m.pairedRlock, nonDeferPair,
 		m.pairedMDeferlock, m.pairedWDeferlock, m.pairedRDeferlock, deferPair, totalPair,

@@ -201,7 +201,7 @@ func (g *gocc) collectAllLUPoints() {
 
 	totalLUPoints := 0
 	for node := range g.cg.Nodes {
-		m, r, w, ptToIns, insToPt := collectLUPoints(node)
+		m, r, w, misc, ptToIns, insToPt := g.collectLUPoints(node)
 		g.funcSummaryMap[node] = &functionSummary{
 			f:       node,
 			ptToIns: ptToIns,
@@ -209,8 +209,9 @@ func (g *gocc) collectAllLUPoints() {
 			m:       m,
 			r:       r,
 			w:       w,
+			misc:    misc,
 		}
-		totalLUPoints += len(w.d) + len(w.l) + len(w.u)
+		totalLUPoints += len(w.d) + len(w.l) + len(w.u) + len(misc)
 		for k, v := range ptToIns {
 			g.allLUPoints[k] = v
 			g.allLUFunc[k] = node

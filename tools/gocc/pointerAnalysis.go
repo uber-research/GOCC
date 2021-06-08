@@ -13,27 +13,30 @@ import (
 	"golang.org/x/tools/go/ssa"
 )
 
-// collectPointsToSet updates the PointsToSet in each of lPoints, uPoints, and dPoints
-func (g *gocc) collectPointsToSet() {
-	mainPkg := make([]*ssa.Package, 1)
+func (g *gocc) getMainPkgs() []*ssa.Package {
+	mainPkg := []*ssa.Package{}
 	if g.isSingleFile || !g.synthetic {
 		for _, pkg := range g.ssapkgs {
 			if pkg != nil && pkg.Pkg.Name() == "main" {
-				mainPkg[0] = pkg
-				break
+				mainPkg = append(mainPkg, pkg)
 			}
 		}
 	} else {
 		for _, pkg := range g.ssapkgs {
 			if pkg != nil && pkg.Pkg.Name() == "main" {
 				if pkg.Func("OptiLockSyntheticMain") != nil {
-					mainPkg[0] = pkg
-					break
+					mainPkg = append(mainPkg, pkg)
 				}
 			}
 		}
 	}
-	if mainPkg[0] == nil {
+	return mainPkg
+}
+
+// collectPointsToSet updates the PointsToSet in each of lPoints, uPoints, and dPoints
+func (g *gocc) collectPointsToSet() {
+	mainPkg := g.getMainPkgs()
+	if len(mainPkg) == 0 {
 		panic("No main package found!")
 	}
 	pc := pointer.Config{
@@ -44,14 +47,99 @@ func (g *gocc) collectPointsToSet() {
 		IndirectQueries: make(map[ssa.Value]struct{}),
 	}
 
+	// First collect all indirection function call values and identify all the potential "closures" they may be calling.
+	// collect all values
+	indirectCallToLUPointMap := map[ssa.Value][]*luPoint{}
+
+	for k, _ := range g.allLUPoints {
+		if !k.isDynamic {
+			continue
+		}
+		// indirect calls
+		val := k.callC.Value
+		pc.Queries[val] = struct{}{}
+		//	pc.IndirectQueries[val] = struct{}{}
+		indirectCallToLUPointMap[val] = append(indirectCallToLUPointMap[val], k)
+	}
+
+	// find the functions that these indirection calls invoke.
+	calleeResult, err := pointer.Analyze(&pc)
+	if err != nil {
+		panic("pointer.Analyze( failed")
+	}
+
+	// Get the free var in these indirectly invoked functions
+	for k, v := range calleeResult.Queries {
+		pts, ok := indirectCallToLUPointMap[k]
+		if !ok {
+			panic("Why is it not present in the map?")
+		}
+		if len(pts) == 0 {
+			panic("Why len(pts) == 0  ?")
+		}
+
+		for _, lbl := range v.PointsTo().Labels() {
+			if lbl == nil || lbl.Value() == nil {
+				continue
+			}
+
+			// is the label a function?
+			fn, ok := lbl.Value().(*ssa.Function)
+			if !ok {
+				continue
+			}
+			// the function should have zero parameters
+			if len(fn.Params) != 0 {
+				continue
+			}
+			// the function should have one freevar
+			if len(fn.FreeVars) != 1 { // only the sync.Mutex or sync.RWMutex can be captured
+				continue
+			}
+
+			// the type of the freevar must be "*sync.Mutex" or "*sync.RWMutex"
+			switch fn.FreeVars[0].Type().String() {
+			case "*sync.Mutex", "*sync.RWMutex":
+				for _, pt := range pts {
+					pt.indirectMutexVals = append(pt.indirectMutexVals, fn.FreeVars[0])
+				}
+			}
+		}
+	}
+
+	// sanity check
+	for k, _ := range g.allLUPoints {
+		if k.isDynamic {
+			// if len(k.indirectMutexVals) == 0 {
+			// 	panic("no indect mutex value extracted!")
+			// }
+			if k.mutexVal != nil {
+				panic(" mutexVal value should be nil here!")
+			}
+		} else if len(k.indirectMutexVals) != 0 {
+			panic(" indect mutex value is unexpected here!")
+		}
+	}
+
+	// Second: collects pointsto set of all LUPoints
+	// reset the query
+	pc.Queries = make(map[ssa.Value]struct{})
+	pc.IndirectQueries = make(map[ssa.Value]struct{})
 	valToLUPointMap := map[ssa.Value][]*luPoint{}
 
 	// collect all values
 	for k, _ := range g.allLUPoints {
-		val := k.mutexValue()
-		pc.Queries[val] = struct{}{}
-		//	pc.IndirectQueries[val] = struct{}{}
-		valToLUPointMap[val] = append(valToLUPointMap[val], k)
+		if !k.isDynamic {
+			if val := k.mutexValue(); val != nil {
+				pc.Queries[val] = struct{}{}
+				valToLUPointMap[val] = append(valToLUPointMap[val], k)
+			}
+		} else {
+			for _, ind := range k.indirectMutexVals {
+				pc.Queries[ind] = struct{}{}
+				valToLUPointMap[ind] = append(valToLUPointMap[ind], k)
+			}
+		}
 	}
 
 	result, err := pointer.Analyze(&pc)
@@ -70,21 +158,7 @@ func (g *gocc) collectPointsToSet() {
 		}
 
 		for _, pt := range pts {
-			pt.setAliasingPointer(v)
+			pt.appendToAliasingPointer(v)
 		}
 	}
-	/*
-		for k, v := range result.IndirectQueries {
-			pts, ok := valToLUPointMap[k]
-			if !ok {
-				panic("Why is it not present in the map?")
-			}
-			if len(pts) == 0 {
-				panic("Why len(pts) == 0  ?")
-			}
-
-			for _, pt := range pts {
-				pt.setIndirectPointsToSet(v.PointsTo())
-			}
-		}*/
 }
