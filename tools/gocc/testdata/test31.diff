@@ -1,15 +1,14 @@
 diff --git a/tools/gocc/testdata/test31.go b/tools/gocc/testdata/test31.go
-index cc96885..5335924 100644
+index 59e86ae..1ef99b8 100644
 --- a/tools/gocc/testdata/test31.go
 +++ b/tools/gocc/testdata/test31.go
-@@ -1,11 +1,15 @@
+@@ -1,13 +1,15 @@
  package main
  
--import "sync"
-+import (
-+	"sync"
+ import (
 +	rtm "github.com/uber-research/GOCC/tools/gocc/rtmlib"
-+)
+ 	"sync"
+ )
  
  func foo(m *sync.Mutex, u func()) {
 -	m.Lock()
