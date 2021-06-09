@@ -94,7 +94,7 @@ index df46fa8..ba38b1c 100644
  		return nil, &errSinkNotFound{u.Scheme}
  	}
 diff --git a/tools/gocc/testdata/src/go.uber.org/zap/zaptest/observer/observer.go b/tools/gocc/testdata/src/go.uber.org/zap/zaptest/observer/observer.go
-index 78f5be4..a9f2197 100644
+index 78f5be4..085685b 100644
 --- a/tools/gocc/testdata/src/go.uber.org/zap/zaptest/observer/observer.go
 +++ b/tools/gocc/testdata/src/go.uber.org/zap/zaptest/observer/observer.go
 @@ -25,6 +25,7 @@
@@ -145,7 +145,19 @@ index 78f5be4..a9f2197 100644
  	return ret
  }
  
-@@ -118,9 +122,10 @@ func (o *ObservedLogs) filter(match func(LoggedEntry) bool) *ObservedLogs {
+@@ -105,8 +109,9 @@ func (o *ObservedLogs) FilterField(field zapcore.Field) *ObservedLogs {
+ }
+ 
+ func (o *ObservedLogs) filter(match func(LoggedEntry) bool) *ObservedLogs {
+-	o.mu.RLock()
+-	defer o.mu.RUnlock()
++	optiLock1 := rtm.OptiLock{}
++	optiLock1.RLock(&o.mu)
++	defer optiLock1.RUnlock(&o.mu)
+ 
+ 	var filtered []LoggedEntry
+ 	for _, entry := range o.logs {
+@@ -118,9 +123,10 @@ func (o *ObservedLogs) filter(match func(LoggedEntry) bool) *ObservedLogs {
  }
  
  func (o *ObservedLogs) add(log LoggedEntry) {
