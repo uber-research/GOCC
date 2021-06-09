@@ -49,7 +49,7 @@ index 9b6f226..64b6156 100644
  
  // Close waits for metrics to be flushed before closing the backend.
 diff --git a/tools/gocc/testdata/src/github.com/uber-go/tally/scope.go b/tools/gocc/testdata/src/github.com/uber-go/tally/scope.go
-index 66f3aa1..a22b96a 100644
+index 66f3aa1..13529c8 100644
 --- a/tools/gocc/testdata/src/github.com/uber-go/tally/scope.go
 +++ b/tools/gocc/testdata/src/github.com/uber-go/tally/scope.go
 @@ -21,6 +21,7 @@
@@ -60,7 +60,7 @@ index 66f3aa1..a22b96a 100644
  	"io"
  	"sync"
  	"time"
-@@ -183,25 +184,28 @@ func newRootScope(opts ScopeOptions, interval time.Duration) *scope {
+@@ -183,47 +184,53 @@ func newRootScope(opts ScopeOptions, interval time.Duration) *scope {
  
  // report dumps all aggregated stats into the reporter. Should be called automatically by the root scope periodically.
  func (s *scope) report(r StatsReporter) {
@@ -95,7 +95,52 @@ index 66f3aa1..a22b96a 100644
  }
  
  func (s *scope) cachedReport() {
-@@ -266,13 +270,14 @@ func (s *scope) reportRegistryWithLock() {
+-	s.cm.RLock()
++	optiLock3 := rtm.OptiLock{}
++	optiLock2 := rtm.OptiLock{}
++	optiLock1 := rtm.OptiLock{}
++	optiLock3.RLock(&s.cm)
+ 	for _, counter := range s.countersSlice {
+ 		counter.cachedReport()
+ 	}
+-	s.cm.RUnlock()
++	optiLock3.RUnlock(&s.cm)
+ 
+-	s.gm.RLock()
++	optiLock2.RLock(&s.gm)
+ 	for _, gauge := range s.gaugesSlice {
+ 		gauge.cachedReport()
+ 	}
+-	s.gm.RUnlock()
++	optiLock2.RUnlock(&s.gm)
+ 
+ 	// we do nothing for timers here because timers report directly to ths StatsReporter without buffering
+ 
+-	s.hm.RLock()
++	optiLock1.RLock(&s.hm)
+ 	for _, histogram := range s.histogramsSlice {
+ 		histogram.cachedReport()
+ 	}
+-	s.hm.RUnlock()
++	optiLock1.RUnlock(&s.hm)
+ }
+ 
+ // reportLoop is used by the root scope for periodic reporting
+@@ -242,10 +249,11 @@ func (s *scope) reportLoop(interval time.Duration) {
+ }
+ 
+ func (s *scope) reportLoopRun() {
++	optiLock1 := rtm.OptiLock{}
+ 	// Need to hold a status lock to ensure not to report
+ 	// and flush after a close
+-	s.status.RLock()
+-	defer s.status.RUnlock()
++	optiLock1.RLock(&s.status.RWMutex)
++	defer optiLock1.RUnlock(&s.status.RWMutex)
+ 
+ 	if s.status.closed {
+ 		return
+@@ -266,13 +274,14 @@ func (s *scope) reportRegistryWithLock() {
  }
  
  func (s *scope) Counter(name string) Counter {
@@ -112,7 +157,7 @@ index 66f3aa1..a22b96a 100644
  
  	if c, ok := s.counters[name]; ok {
  		return c
-@@ -294,21 +299,23 @@ func (s *scope) Counter(name string) Counter {
+@@ -294,21 +303,23 @@ func (s *scope) Counter(name string) Counter {
  }
  
  func (s *scope) counter(sanitizedName string) (Counter, bool) {
@@ -140,7 +185,7 @@ index 66f3aa1..a22b96a 100644
  
  	if g, ok := s.gauges[name]; ok {
  		return g
-@@ -329,21 +336,23 @@ func (s *scope) Gauge(name string) Gauge {
+@@ -329,21 +340,23 @@ func (s *scope) Gauge(name string) Gauge {
  }
  
  func (s *scope) gauge(name string) (Gauge, bool) {
@@ -168,7 +213,7 @@ index 66f3aa1..a22b96a 100644
  
  	if t, ok := s.timers[name]; ok {
  		return t
-@@ -365,8 +374,9 @@ func (s *scope) Timer(name string) Timer {
+@@ -365,14 +378,16 @@ func (s *scope) Timer(name string) Timer {
  }
  
  func (s *scope) timer(sanitizedName string) (Timer, bool) {
@@ -180,7 +225,25 @@ index 66f3aa1..a22b96a 100644
  
  	t, ok := s.timers[sanitizedName]
  	return t, ok
-@@ -406,8 +416,9 @@ func (s *scope) Histogram(name string, b Buckets) Histogram {
+ }
+ 
+ func (s *scope) Histogram(name string, b Buckets) Histogram {
++	optiLock1 := rtm.OptiLock{}
+ 	name = s.sanitizer.Name(name)
+ 	if h, ok := s.histogram(name); ok {
+ 		return h
+@@ -382,8 +397,8 @@ func (s *scope) Histogram(name string, b Buckets) Histogram {
+ 		b = s.defaultBuckets
+ 	}
+ 
+-	s.hm.Lock()
+-	defer s.hm.Unlock()
++	optiLock1.WLock(&s.hm)
++	defer optiLock1.WUnlock(&s.hm)
+ 
+ 	if h, ok := s.histograms[name]; ok {
+ 		return h
+@@ -406,8 +421,9 @@ func (s *scope) Histogram(name string, b Buckets) Histogram {
  }
  
  func (s *scope) histogram(sanitizedName string) (Histogram, bool) {
@@ -192,8 +255,81 @@ index 66f3aa1..a22b96a 100644
  
  	h, ok := s.histograms[sanitizedName]
  	return h, ok
+@@ -438,13 +454,18 @@ func (s *scope) Snapshot() Snapshot {
+ 	snap := newSnapshot()
+ 
+ 	s.registry.ForEachScope(func(ss *scope) {
++		optiLock4 := rtm.OptiLock{}
+ 		// NB(r): tags are immutable, no lock required to read.
++		optiLock3 := rtm.OptiLock{}
++		optiLock2 := rtm.OptiLock{}
++		optiLock1 := rtm.OptiLock{}
++
+ 		tags := make(map[string]string, len(s.tags))
+ 		for k, v := range ss.tags {
+ 			tags[k] = v
+ 		}
+ 
+-		ss.cm.RLock()
++		optiLock4.RLock(&ss.cm)
+ 		for key, c := range ss.counters {
+ 			name := ss.fullyQualifiedName(key)
+ 			id := KeyForPrefixedStringMap(name, tags)
+@@ -454,8 +475,8 @@ func (s *scope) Snapshot() Snapshot {
+ 				value: c.snapshot(),
+ 			}
+ 		}
+-		ss.cm.RUnlock()
+-		ss.gm.RLock()
++		optiLock4.RUnlock(&ss.cm)
++		optiLock3.RLock(&ss.gm)
+ 		for key, g := range ss.gauges {
+ 			name := ss.fullyQualifiedName(key)
+ 			id := KeyForPrefixedStringMap(name, tags)
+@@ -465,8 +486,8 @@ func (s *scope) Snapshot() Snapshot {
+ 				value: g.snapshot(),
+ 			}
+ 		}
+-		ss.gm.RUnlock()
+-		ss.tm.RLock()
++		optiLock3.RUnlock(&ss.gm)
++		optiLock2.RLock(&ss.tm)
+ 		for key, t := range ss.timers {
+ 			name := ss.fullyQualifiedName(key)
+ 			id := KeyForPrefixedStringMap(name, tags)
+@@ -476,8 +497,8 @@ func (s *scope) Snapshot() Snapshot {
+ 				values: t.snapshot(),
+ 			}
+ 		}
+-		ss.tm.RUnlock()
+-		ss.hm.RLock()
++		optiLock2.RUnlock(&ss.tm)
++		optiLock1.RLock(&ss.hm)
+ 		for key, h := range ss.histograms {
+ 			name := ss.fullyQualifiedName(key)
+ 			id := KeyForPrefixedStringMap(name, tags)
+@@ -488,15 +509,16 @@ func (s *scope) Snapshot() Snapshot {
+ 				durations: h.snapshotDurations(),
+ 			}
+ 		}
+-		ss.hm.RUnlock()
++		optiLock1.RUnlock(&ss.hm)
+ 	})
+ 
+ 	return snap
+ }
+ 
+ func (s *scope) Close() error {
+-	s.status.Lock()
+-	defer s.status.Unlock()
++	optiLock1 := rtm.OptiLock{}
++	optiLock1.WLock(&s.status.RWMutex)
++	defer optiLock1.WUnlock(&s.status.RWMutex)
+ 
+ 	// don't wait to close more than once (panic on double close of
+ 	// s.status.quit)
 diff --git a/tools/gocc/testdata/src/github.com/uber-go/tally/scope_registry.go b/tools/gocc/testdata/src/github.com/uber-go/tally/scope_registry.go
-index 6ed5eb4..0a4c831 100644
+index 6ed5eb4..d6bb216 100644
 --- a/tools/gocc/testdata/src/github.com/uber-go/tally/scope_registry.go
 +++ b/tools/gocc/testdata/src/github.com/uber-go/tally/scope_registry.go
 @@ -20,7 +20,10 @@
@@ -220,7 +356,31 @@ index 6ed5eb4..0a4c831 100644
  
  	for _, s := range r.subscopes {
  		s.report(reporter)
-@@ -65,6 +69,7 @@ func (r *scopeRegistry) ForEachScope(f func(*scope)) {
+@@ -47,8 +51,9 @@ func (r *scopeRegistry) Report(reporter StatsReporter) {
+ }
+ 
+ func (r *scopeRegistry) CachedReport() {
+-	r.mu.RLock()
+-	defer r.mu.RUnlock()
++	optiLock1 := rtm.OptiLock{}
++	optiLock1.RLock(&r.mu)
++	defer optiLock1.RUnlock(&r.mu)
+ 
+ 	for _, s := range r.subscopes {
+ 		s.cachedReport()
+@@ -56,8 +61,9 @@ func (r *scopeRegistry) CachedReport() {
+ }
+ 
+ func (r *scopeRegistry) ForEachScope(f func(*scope)) {
+-	r.mu.RLock()
+-	defer r.mu.RUnlock()
++	optiLock1 := rtm.OptiLock{}
++	optiLock1.RLock(&r.mu)
++	defer optiLock1.RUnlock(&r.mu)
+ 
+ 	for _, s := range r.subscopes {
+ 		f(s)
+@@ -65,6 +71,7 @@ func (r *scopeRegistry) ForEachScope(f func(*scope)) {
  }
  
  func (r *scopeRegistry) Subscope(parent *scope, prefix string, tags map[string]string) *scope {
@@ -228,7 +388,7 @@ index 6ed5eb4..0a4c831 100644
  	key := scopeRegistryKey(prefix, parent.tags, tags)
  
  	r.mu.RLock()
-@@ -74,8 +79,8 @@ func (r *scopeRegistry) Subscope(parent *scope, prefix string, tags map[string]s
+@@ -74,8 +81,8 @@ func (r *scopeRegistry) Subscope(parent *scope, prefix string, tags map[string]s
  	}
  	r.mu.RUnlock()
  
@@ -284,7 +444,7 @@ index 247ee46..aa749dc 100644
 diff --git a/tools/gocc/testdata/src/github.com/uber-go/tally/thirdparty/github.com/apache/thrift/lib/go/thrift/server_socket.go b/tools/gocc/testdata/src/github.com/uber-go/tally/thirdparty/github.com/apache/thrift/lib/go/thrift/server_socket.go
 old mode 100755
 new mode 100644
-index d6e9495..7f5c535
+index d6e9495..eca2777
 --- a/tools/gocc/testdata/src/github.com/uber-go/tally/thirdparty/github.com/apache/thrift/lib/go/thrift/server_socket.go
 +++ b/tools/gocc/testdata/src/github.com/uber-go/tally/thirdparty/github.com/apache/thrift/lib/go/thrift/server_socket.go
 @@ -20,6 +20,7 @@
@@ -308,3 +468,332 @@ index d6e9495..7f5c535
  
  	if interrupted {
  		return nil, errTransportInterrupted
+@@ -113,10 +115,11 @@ func (p *TServerSocket) Close() error {
+ }
+ 
+ func (p *TServerSocket) Interrupt() error {
+-	p.mu.Lock()
++	optiLock1 := rtm.OptiLock{}
++	optiLock1.WLock(&p.mu)
+ 	p.interrupted = true
+ 	p.Close()
+-	p.mu.Unlock()
++	optiLock1.WUnlock(&p.mu)
+ 
+ 	return nil
+ }
+diff --git a/tools/gocc/testdata/tally.diff b/tools/gocc/testdata/tally.diff
+index 4a75fbf..1602649 100644
+--- a/tools/gocc/testdata/tally.diff
++++ b/tools/gocc/testdata/tally.diff
+@@ -1,310 +0,0 @@
+-diff --git a/tools/gocc/testdata/src/github.com/uber-go/tally/m3/reporter.go b/tools/gocc/testdata/src/github.com/uber-go/tally/m3/reporter.go
+-index 9b6f226..64b6156 100644
+---- a/tools/gocc/testdata/src/github.com/uber-go/tally/m3/reporter.go
+-+++ b/tools/gocc/testdata/src/github.com/uber-go/tally/m3/reporter.go
+-@@ -23,6 +23,7 @@ package m3
+- import (
+- 	"errors"
+- 	"fmt"
+-+	rtm "github.com/uber-research/GOCC/tools/gocc/rtmlib"
+- 	"io"
+- 	"math"
+- 	"os"
+-@@ -412,6 +413,8 @@ func (r *reporter) reportCopyMetric(
+- 	iValue int64,
+- 	dValue float64,
+- ) {
+-+	optiLock1 := rtm.OptiLock{}
+-+
+- 	copy := r.resourcePool.getMetric()
+- 	copy.Name = m.Name
+- 	copy.Tags = m.Tags
+-@@ -434,23 +437,24 @@ func (r *reporter) reportCopyMetric(
+- 		copy.MetricValue.Timer = t
+- 	}
+- 
+--	r.status.RLock()
+-+	optiLock1.RLock(&r.status.RWMutex)
+- 	if !r.status.closed {
+- 		select {
+- 		case r.metCh <- sizedMetric{copy, size}:
+- 		default:
+- 		}
+- 	}
+--	r.status.RUnlock()
+-+	optiLock1.RUnlock(&r.status.RWMutex)
+- }
+- 
+- // Flush sends an empty sizedMetric to signal a flush.
+- func (r *reporter) Flush() {
+--	r.status.RLock()
+-+	optiLock1 := rtm.OptiLock{}
+-+	optiLock1.RLock(&r.status.RWMutex)
+- 	if !r.status.closed {
+- 		r.metCh <- sizedMetric{}
+- 	}
+--	r.status.RUnlock()
+-+	optiLock1.RUnlock(&r.status.RWMutex)
+- }
+- 
+- // Close waits for metrics to be flushed before closing the backend.
+-diff --git a/tools/gocc/testdata/src/github.com/uber-go/tally/scope.go b/tools/gocc/testdata/src/github.com/uber-go/tally/scope.go
+-index 66f3aa1..a22b96a 100644
+---- a/tools/gocc/testdata/src/github.com/uber-go/tally/scope.go
+-+++ b/tools/gocc/testdata/src/github.com/uber-go/tally/scope.go
+-@@ -21,6 +21,7 @@
+- package tally
+- 
+- import (
+-+	rtm "github.com/uber-research/GOCC/tools/gocc/rtmlib"
+- 	"io"
+- 	"sync"
+- 	"time"
+-@@ -183,25 +184,28 @@ func newRootScope(opts ScopeOptions, interval time.Duration) *scope {
+- 
+- // report dumps all aggregated stats into the reporter. Should be called automatically by the root scope periodically.
+- func (s *scope) report(r StatsReporter) {
+--	s.cm.RLock()
+-+	optiLock3 := rtm.OptiLock{}
+-+	optiLock2 := rtm.OptiLock{}
+-+	optiLock1 := rtm.OptiLock{}
+-+	optiLock3.RLock(&s.cm)
+- 	for name, counter := range s.counters {
+- 		counter.report(s.fullyQualifiedName(name), s.tags, r)
+- 	}
+--	s.cm.RUnlock()
+-+	optiLock3.RUnlock(&s.cm)
+- 
+--	s.gm.RLock()
+-+	optiLock2.RLock(&s.gm)
+- 	for name, gauge := range s.gauges {
+- 		gauge.report(s.fullyQualifiedName(name), s.tags, r)
+- 	}
+--	s.gm.RUnlock()
+-+	optiLock2.RUnlock(&s.gm)
+- 
+- 	// we do nothing for timers here because timers report directly to ths StatsReporter without buffering
+- 
+--	s.hm.RLock()
+-+	optiLock1.RLock(&s.hm)
+- 	for name, histogram := range s.histograms {
+- 		histogram.report(s.fullyQualifiedName(name), s.tags, r)
+- 	}
+--	s.hm.RUnlock()
+-+	optiLock1.RUnlock(&s.hm)
+- }
+- 
+- func (s *scope) cachedReport() {
+-@@ -266,13 +270,14 @@ func (s *scope) reportRegistryWithLock() {
+- }
+- 
+- func (s *scope) Counter(name string) Counter {
+-+	optiLock1 := rtm.OptiLock{}
+- 	name = s.sanitizer.Name(name)
+- 	if c, ok := s.counter(name); ok {
+- 		return c
+- 	}
+- 
+--	s.cm.Lock()
+--	defer s.cm.Unlock()
+-+	optiLock1.WLock(&s.cm)
+-+	defer optiLock1.WUnlock(&s.cm)
+- 
+- 	if c, ok := s.counters[name]; ok {
+- 		return c
+-@@ -294,21 +299,23 @@ func (s *scope) Counter(name string) Counter {
+- }
+- 
+- func (s *scope) counter(sanitizedName string) (Counter, bool) {
+--	s.cm.RLock()
+--	defer s.cm.RUnlock()
+-+	optiLock1 := rtm.OptiLock{}
+-+	optiLock1.RLock(&s.cm)
+-+	defer optiLock1.RUnlock(&s.cm)
+- 
+- 	c, ok := s.counters[sanitizedName]
+- 	return c, ok
+- }
+- 
+- func (s *scope) Gauge(name string) Gauge {
+-+	optiLock1 := rtm.OptiLock{}
+- 	name = s.sanitizer.Name(name)
+- 	if g, ok := s.gauge(name); ok {
+- 		return g
+- 	}
+- 
+--	s.gm.Lock()
+--	defer s.gm.Unlock()
+-+	optiLock1.WLock(&s.gm)
+-+	defer optiLock1.WUnlock(&s.gm)
+- 
+- 	if g, ok := s.gauges[name]; ok {
+- 		return g
+-@@ -329,21 +336,23 @@ func (s *scope) Gauge(name string) Gauge {
+- }
+- 
+- func (s *scope) gauge(name string) (Gauge, bool) {
+--	s.gm.RLock()
+--	defer s.gm.RUnlock()
+-+	optiLock1 := rtm.OptiLock{}
+-+	optiLock1.RLock(&s.gm)
+-+	defer optiLock1.RUnlock(&s.gm)
+- 
+- 	g, ok := s.gauges[name]
+- 	return g, ok
+- }
+- 
+- func (s *scope) Timer(name string) Timer {
+-+	optiLock1 := rtm.OptiLock{}
+- 	name = s.sanitizer.Name(name)
+- 	if t, ok := s.timer(name); ok {
+- 		return t
+- 	}
+- 
+--	s.tm.Lock()
+--	defer s.tm.Unlock()
+-+	optiLock1.WLock(&s.tm)
+-+	defer optiLock1.WUnlock(&s.tm)
+- 
+- 	if t, ok := s.timers[name]; ok {
+- 		return t
+-@@ -365,8 +374,9 @@ func (s *scope) Timer(name string) Timer {
+- }
+- 
+- func (s *scope) timer(sanitizedName string) (Timer, bool) {
+--	s.tm.RLock()
+--	defer s.tm.RUnlock()
+-+	optiLock1 := rtm.OptiLock{}
+-+	optiLock1.RLock(&s.tm)
+-+	defer optiLock1.RUnlock(&s.tm)
+- 
+- 	t, ok := s.timers[sanitizedName]
+- 	return t, ok
+-@@ -406,8 +416,9 @@ func (s *scope) Histogram(name string, b Buckets) Histogram {
+- }
+- 
+- func (s *scope) histogram(sanitizedName string) (Histogram, bool) {
+--	s.hm.RLock()
+--	defer s.hm.RUnlock()
+-+	optiLock1 := rtm.OptiLock{}
+-+	optiLock1.RLock(&s.hm)
+-+	defer optiLock1.RUnlock(&s.hm)
+- 
+- 	h, ok := s.histograms[sanitizedName]
+- 	return h, ok
+-diff --git a/tools/gocc/testdata/src/github.com/uber-go/tally/scope_registry.go b/tools/gocc/testdata/src/github.com/uber-go/tally/scope_registry.go
+-index 6ed5eb4..0a4c831 100644
+---- a/tools/gocc/testdata/src/github.com/uber-go/tally/scope_registry.go
+-+++ b/tools/gocc/testdata/src/github.com/uber-go/tally/scope_registry.go
+-@@ -20,7 +20,10 @@
+- 
+- package tally
+- 
+--import "sync"
+-+import (
+-+	"sync"
+-+	rtm "github.com/uber-research/GOCC/tools/gocc/rtmlib"
+-+)
+- 
+- var scopeRegistryKey = keyForPrefixedStringMaps
+- 
+-@@ -38,8 +41,9 @@ func newScopeRegistry(root *scope) *scopeRegistry {
+- }
+- 
+- func (r *scopeRegistry) Report(reporter StatsReporter) {
+--	r.mu.RLock()
+--	defer r.mu.RUnlock()
+-+	optiLock1 := rtm.OptiLock{}
+-+	optiLock1.RLock(&r.mu)
+-+	defer optiLock1.RUnlock(&r.mu)
+- 
+- 	for _, s := range r.subscopes {
+- 		s.report(reporter)
+-@@ -65,6 +69,7 @@ func (r *scopeRegistry) ForEachScope(f func(*scope)) {
+- }
+- 
+- func (r *scopeRegistry) Subscope(parent *scope, prefix string, tags map[string]string) *scope {
+-+	optiLock1 := rtm.OptiLock{}
+- 	key := scopeRegistryKey(prefix, parent.tags, tags)
+- 
+- 	r.mu.RLock()
+-@@ -74,8 +79,8 @@ func (r *scopeRegistry) Subscope(parent *scope, prefix string, tags map[string]s
+- 	}
+- 	r.mu.RUnlock()
+- 
+--	r.mu.Lock()
+--	defer r.mu.Unlock()
+-+	optiLock1.WLock(&r.mu)
+-+	defer optiLock1.WUnlock(&r.mu)
+- 
+- 	if s, ok := r.lockedLookup(key); ok {
+- 		return s
+-diff --git a/tools/gocc/testdata/src/github.com/uber-go/tally/stats.go b/tools/gocc/testdata/src/github.com/uber-go/tally/stats.go
+-index 247ee46..aa749dc 100644
+---- a/tools/gocc/testdata/src/github.com/uber-go/tally/stats.go
+-+++ b/tools/gocc/testdata/src/github.com/uber-go/tally/stats.go
+-@@ -21,6 +21,7 @@
+- package tally
+- 
+- import (
+-+	rtm "github.com/uber-research/GOCC/tools/gocc/rtmlib"
+- 	"math"
+- 	"sort"
+- 	"sync"
+-@@ -190,12 +191,13 @@ func (t *timer) RecordStopwatch(stopwatchStart time.Time) {
+- }
+- 
+- func (t *timer) snapshot() []time.Duration {
+--	t.unreported.RLock()
+-+	optiLock1 := rtm.OptiLock{}
+-+	optiLock1.RLock(&t.unreported.RWMutex)
+- 	snap := make([]time.Duration, len(t.unreported.values))
+- 	for i := range t.unreported.values {
+- 		snap[i] = t.unreported.values[i]
+- 	}
+--	t.unreported.RUnlock()
+-+	optiLock1.RUnlock(&t.unreported.RWMutex)
+- 	return snap
+- }
+- 
+-@@ -223,9 +225,11 @@ func (r *timerNoReporterSink) ReportTimer(
+- 	tags map[string]string,
+- 	interval time.Duration,
+- ) {
+--	r.timer.unreported.Lock()
+-+	optiLock1 := rtm.OptiLock{}
+-+
+-+	optiLock1.WLock(&r.timer.unreported.RWMutex)
+- 	r.timer.unreported.values = append(r.timer.unreported.values, interval)
+--	r.timer.unreported.Unlock()
+-+	optiLock1.WUnlock(&r.timer.unreported.RWMutex)
+- }
+- 
+- func (r *timerNoReporterSink) ReportHistogramValueSamples(
+-diff --git a/tools/gocc/testdata/src/github.com/uber-go/tally/thirdparty/github.com/apache/thrift/lib/go/thrift/server_socket.go b/tools/gocc/testdata/src/github.com/uber-go/tally/thirdparty/github.com/apache/thrift/lib/go/thrift/server_socket.go
+-old mode 100755
+-new mode 100644
+-index d6e9495..7f5c535
+---- a/tools/gocc/testdata/src/github.com/uber-go/tally/thirdparty/github.com/apache/thrift/lib/go/thrift/server_socket.go
+-+++ b/tools/gocc/testdata/src/github.com/uber-go/tally/thirdparty/github.com/apache/thrift/lib/go/thrift/server_socket.go
+-@@ -20,6 +20,7 @@
+- package thrift
+- 
+- import (
+-+	rtm "github.com/uber-research/GOCC/tools/gocc/rtmlib"
+- 	"net"
+- 	"sync"
+- 	"time"
+-@@ -60,9 +61,10 @@ func (p *TServerSocket) Listen() error {
+- }
+- 
+- func (p *TServerSocket) Accept() (TTransport, error) {
+--	p.mu.RLock()
+-+	optiLock1 := rtm.OptiLock{}
+-+	optiLock1.RLock(&p.mu)
+- 	interrupted := p.interrupted
+--	p.mu.RUnlock()
+-+	optiLock1.RUnlock(&p.mu)
+- 
+- 	if interrupted {
+- 		return nil, errTransportInterrupted
