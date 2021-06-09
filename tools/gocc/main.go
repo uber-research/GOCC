@@ -16,9 +16,9 @@ import (
 	"strings"
 
 	libbuilder "github.com/uber-research/GOCC/lib/builder"
-	libcg "github.com/uber-research/GOCC/lib/callgraph"
 	"golang.org/x/tools/go/callgraph"
 	"golang.org/x/tools/go/packages"
+	"golang.org/x/tools/go/pointer"
 	"golang.org/x/tools/go/ssa"
 	"golang.org/x/tools/go/ssa/ssautil"
 )
@@ -267,7 +267,22 @@ func (g *gocc) buildCG() {
 	}
 	g.prog, g.ssapkgs = ssautil.AllPackages(g.pkgs /*ssa.BuilderMode(0)*/, ssa.GlobalDebug)
 	libbuilder.BuildPackages(g.prog, g.ssapkgs, true, true)
-	g.cg = libcg.BuildRtaCG(g.prog, true)
+	mainPkg := g.getMainPkgs()
+	if len(mainPkg) == 0 {
+		panic("No main package found!")
+	}
+	pc := pointer.Config{
+		Reflection:      false,
+		BuildCallGraph:  true,
+		Mains:           mainPkg,
+		Queries:         make(map[ssa.Value]struct{}),
+		IndirectQueries: make(map[ssa.Value]struct{}),
+	}
+	result, err := pointer.Analyze(&pc)
+	if err != nil {
+		panic("pointer.Analyze() failed in call graph construction.")
+	}
+	g.cg = result.CallGraph
 }
 
 func (g *gocc) dumpInfo() {
