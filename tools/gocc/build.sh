@@ -10,3 +10,6 @@
 GO=go
 $GO fmt
 $GO build
+
+## test
+GO111MODULE=off go test . -v 
