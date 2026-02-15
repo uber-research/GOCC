@@ -1,14 +1,16 @@
-//Copyright (c) 2020 Uber Technologies, Inc.
+// Copyright (c) 2020 Uber Technologies, Inc.
 //
-//Licensed under the Uber Non-Commercial License (the "License");
-//you may not use this file except in compliance with the License.
-//You may obtain a copy of the License at the root directory of this project.
+// Licensed under the Uber Non-Commercial License (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at the root directory of this project.
 //
-//See the License for the specific language governing permissions and
-//limitations under the License.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 package main
 
 import (
+	"fmt"
+
 	"golang.org/x/tools/go/pointer"
 	"golang.org/x/tools/go/ssa"
 )
@@ -34,10 +36,10 @@ func (g *gocc) getMainPkgs() []*ssa.Package {
 }
 
 // collectPointsToSet updates the PointsToSet in each of lPoints, uPoints, and dPoints
-func (g *gocc) collectPointsToSet() {
+func (g *gocc) collectPointsToSet() error {
 	mainPkg := g.getMainPkgs()
 	if len(mainPkg) == 0 {
-		panic("No main package found!")
+		return fmt.Errorf("no main package found")
 	}
 	pc := pointer.Config{
 		Reflection:      false,
@@ -63,9 +65,9 @@ func (g *gocc) collectPointsToSet() {
 	}
 
 	// find the functions that these indirection calls invoke.
-	calleeResult, err := pointer.Analyze(&pc)
-	if err != nil {
-		panic("pointer.Analyze( failed")
+	calleeResult, err := safePointerAnalyze(&pc)
+	if err != nil || calleeResult == nil {
+		return fmt.Errorf("pointer analysis for indirect callees failed: %w", err)
 	}
 
 	// Get the free var in these indirectly invoked functions
@@ -142,9 +144,9 @@ func (g *gocc) collectPointsToSet() {
 		}
 	}
 
-	result, err := pointer.Analyze(&pc)
-	if err != nil {
-		panic("pointer.Analyze( failed")
+	result, err := safePointerAnalyze(&pc)
+	if err != nil || result == nil {
+		return fmt.Errorf("pointer analysis for lock aliases failed: %w", err)
 	}
 
 	// Now, set the PointToSet of each luPoint
@@ -161,4 +163,5 @@ func (g *gocc) collectPointsToSet() {
 			pt.appendToAliasingPointer(v)
 		}
 	}
+	return nil
 }

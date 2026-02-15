@@ -1,11 +1,11 @@
-//Copyright (c) 2020 Uber Technologies, Inc.
+// Copyright (c) 2020 Uber Technologies, Inc.
 //
-//Licensed under the Uber Non-Commercial License (the "License");
-//you may not use this file except in compliance with the License.
-//You may obtain a copy of the License at the root directory of this project.
+// Licensed under the Uber Non-Commercial License (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at the root directory of this project.
 //
-//See the License for the specific language governing permissions and
-//limitations under the License.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 package main
 
 import (
@@ -13,10 +13,12 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"runtime/debug"
 	"strings"
 
 	libbuilder "github.com/uber-research/GOCC/lib/builder"
 	"golang.org/x/tools/go/callgraph"
+	"golang.org/x/tools/go/callgraph/cha"
 	"golang.org/x/tools/go/packages"
 	"golang.org/x/tools/go/pointer"
 	"golang.org/x/tools/go/ssa"
@@ -124,7 +126,7 @@ func isSSAValueAMutexPointer(rcv ssa.Value) bool {
 	return isValue
 }
 
-//TODO(milind): seems incorrect. Probably, we should base it on the Type.
+// TODO(milind): seems incorrect. Probably, we should base it on the Type.
 func checkBlockList(rcv ssa.Value) bool {
 	for _, name := range _blockList {
 		if strings.HasPrefix(rcv.String(), name) {
@@ -193,6 +195,19 @@ const _gocache = "/Users/milind/gocode/src/github.com/patrickmn/go-cache/"
 const _fastcache = "/Users/milind/gocode/src/github.com/VictoriaMetrics/fastcache"
 const _zap = "/Users/milind/gocode/src/go.uber.org/zap/"
 
+func safePointerAnalyze(pc *pointer.Config) (res *pointer.Result, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("pointer.Analyze panic: %v", r)
+			if os.Getenv("GOCC_POINTER_STACK") == "1" {
+				err = fmt.Errorf("%w\n%s", err, debug.Stack())
+			}
+			res = nil
+		}
+	}()
+	return pointer.Analyze(pc)
+}
+
 func (g *gocc) collectAllLUPoints() {
 	g.funcSummaryMap = map[*ssa.Function]*functionSummary{}
 	g.allLUPoints = map[*luPoint]ssa.Instruction{}
@@ -201,6 +216,9 @@ func (g *gocc) collectAllLUPoints() {
 
 	totalLUPoints := 0
 	for node := range g.cg.Nodes {
+		if node == nil {
+			continue
+		}
 		m, r, w, misc, ptToIns, insToPt := g.collectLUPoints(node)
 		g.funcSummaryMap[node] = &functionSummary{
 			f:       node,
@@ -269,7 +287,12 @@ func (g *gocc) buildCG() {
 	libbuilder.BuildPackages(g.prog, g.ssapkgs, true, true)
 	mainPkg := g.getMainPkgs()
 	if len(mainPkg) == 0 {
-		panic("No main package found!")
+		log.Println("No main package found; falling back to CHA callgraph construction.")
+		g.cg = cha.CallGraph(g.prog)
+		if g.cg != nil {
+			g.cg.DeleteSyntheticNodes()
+		}
+		return
 	}
 	pc := pointer.Config{
 		Reflection:      false,
@@ -278,9 +301,15 @@ func (g *gocc) buildCG() {
 		Queries:         make(map[ssa.Value]struct{}),
 		IndirectQueries: make(map[ssa.Value]struct{}),
 	}
-	result, err := pointer.Analyze(&pc)
-	if err != nil {
-		panic("pointer.Analyze() failed in call graph construction.")
+	result, err := safePointerAnalyze(&pc)
+	if err != nil || result == nil || result.CallGraph == nil {
+		log.Printf("pointer.Analyze failed in call graph construction: %v", err)
+		log.Println("Falling back to CHA callgraph construction.")
+		g.cg = cha.CallGraph(g.prog)
+		if g.cg != nil {
+			g.cg.DeleteSyntheticNodes()
+		}
+		return
 	}
 	g.cg = result.CallGraph
 }
@@ -338,14 +367,22 @@ func (g *gocc) Process() {
 	g.buildCG()
 	g.collectAllLUPoints()
 	// Do alias analysis
-	g.collectPointsToSet()
+	if err := g.collectPointsToSet(); err != nil {
+		log.Printf("Points-to analysis unavailable; skipping rewrite for safety: %v", err)
+		return
+	}
 	if g.verbose {
 		log.Printf("globalLUPoints = %d", len(g.allLUPoints))
 	}
 
 	// Greedily compute function summaries (can be done on need basis also)
 	for f, n := range g.cg.Nodes {
-		g.funcSummaryMap[f].compute(n)
+		if f == nil {
+			continue
+		}
+		if fs, ok := g.funcSummaryMap[f]; ok && fs != nil {
+			fs.compute(n)
+		}
 	}
 	g.annotateLambda()
 	g.collectAllLUPairs()

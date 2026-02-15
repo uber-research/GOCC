@@ -1,16 +1,18 @@
-//Copyright (c) 2020 Uber Technologies, Inc.
+// Copyright (c) 2020 Uber Technologies, Inc.
 //
-//Licensed under the Uber Non-Commercial License (the "License");
-//you may not use this file except in compliance with the License.
-//You may obtain a copy of the License at the root directory of this project.
+// Licensed under the Uber Non-Commercial License (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at the root directory of this project.
 //
-//See the License for the specific language governing permissions and
-//limitations under the License.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 package callgraph
 
 import (
 	"fmt"
 	"log"
+	"os"
+	"runtime/debug"
 
 	"golang.org/x/tools/go/callgraph"
 	"golang.org/x/tools/go/callgraph/cha"
@@ -19,6 +21,19 @@ import (
 	"golang.org/x/tools/go/ssa"
 	"golang.org/x/tools/go/ssa/ssautil"
 )
+
+func safePointerAnalyze(ptrConfig *pointer.Config) (res *pointer.Result, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("pointer.Analyze panic: %v", r)
+			if os.Getenv("GOCC_POINTER_STACK") == "1" {
+				err = fmt.Errorf("%w\n%s", err, debug.Stack())
+			}
+			res = nil
+		}
+	}()
+	return pointer.Analyze(ptrConfig)
+}
 
 func BuildChaCG(prog *ssa.Program) *callgraph.Graph {
 	log.Println("Building callgraph using CHA...")
@@ -72,9 +87,11 @@ func BuildPtaCG(prog *ssa.Program) *callgraph.Graph {
 	ptrConfig.Reflection = false
 
 	log.Println("  Pointer analysis running...")
-	ptares, err := pointer.Analyze(&ptrConfig)
-	if err != nil {
-		log.Println("  Pointer analysis failed: %s", err)
+	ptares, err := safePointerAnalyze(&ptrConfig)
+	if err != nil || ptares == nil || ptares.CallGraph == nil {
+		log.Printf("  Pointer analysis failed: %v", err)
+		log.Println("  Falling back to CHA callgraph.")
+		return BuildChaCG(prog)
 	}
 	log.Println("          done")
 	graph := ptares.CallGraph
