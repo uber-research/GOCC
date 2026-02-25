@@ -1,11 +1,11 @@
-//Copyright (c) 2020 Uber Technologies, Inc.
+// Copyright (c) 2020 Uber Technologies, Inc.
 //
-//Licensed under the Uber Non-Commercial License (the "License");
-//you may not use this file except in compliance with the License.
-//You may obtain a copy of the License at the root directory of this project.
+// Licensed under the Uber Non-Commercial License (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at the root directory of this project.
 //
-//See the License for the specific language governing permissions and
-//limitations under the License.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 package main
 
 import (
@@ -13,6 +13,7 @@ import (
 	"go/token"
 	"log"
 	"sort"
+	"sync"
 
 	"golang.org/x/tools/go/callgraph"
 	"golang.org/x/tools/go/pointer"
@@ -160,7 +161,12 @@ func blocksPDomBy(b *ssa.BasicBlock, pdominee map[*ssa.BasicBlock]empty) {
 	if b == nil {
 		return
 	}
-	for _, d := range b.PostDominees() {
+	fn := b.Parent()
+	if fn == nil {
+		return
+	}
+	info := getPostDomInfo(fn)
+	for _, d := range info.postDominees[b] {
 		pdominee[d] = emptyStruct
 		blocksPDomBy(d, pdominee)
 	}
@@ -405,7 +411,7 @@ func blockToUnlockPointMapAscending(uPoints map[*luPoint]ssa.Instruction) map[*s
 
 // orderLocksByPostOrderInDomtree orders all lPoints in post order to help visit inside out.
 func orderLocksByPostOrderInDomtree(f *ssa.Function, lPoints map[*luPoint]ssa.Instruction) []*luPoint {
-	postOrderDomTree := f.DomPostorder()
+	postOrderDomTree := domPostorder(f)
 	blockToLUPt := blockToLockPointDescending(lPoints)
 
 	var postOrderlPoints []*luPoint
@@ -498,6 +504,7 @@ func getNearestUpoint(l *luPoint, ups map[*ssa.BasicBlock][]*luPoint, dups map[*
 
 	var match *luPoint
 	blk := l.block()
+	info := getPostDomInfo(l.ins().Parent())
 	iPdom := blk // start from self
 
 	// interblock
@@ -507,7 +514,7 @@ func getNearestUpoint(l *luPoint, ups map[*ssa.BasicBlock][]*luPoint, dups map[*
 		}
 		// 1. does blk DOMINATE iPDom?
 		if !blk.Dominates(iPdom) {
-			iPdom = iPdom.Ipdom()
+			iPdom = info.ipdom[iPdom]
 			continue
 		}
 
@@ -517,7 +524,7 @@ func getNearestUpoint(l *luPoint, ups map[*ssa.BasicBlock][]*luPoint, dups map[*
 		d, okd := nearestIntersectingUnlock(l, iPdom, dups, alreadyMatched)
 
 		if !oku && !okd {
-			iPdom = iPdom.Ipdom()
+			iPdom = info.ipdom[iPdom]
 			continue
 		}
 
@@ -546,7 +553,7 @@ func getNearestUpoint(l *luPoint, ups map[*ssa.BasicBlock][]*luPoint, dups map[*
 	// Traverse Domtree looking for defer
 	for dom := blk; dom != nil; dom = dom.Idom() {
 		// 1. does blk POSTDOMINATE dom?
-		if !blk.PostDominates(dom) {
+		if !postDominates(info, blk, dom) {
 			break
 		}
 		d, ok := nearestIntersectingDeferUnlockBeforeLock(l, dom, dups, alreadyMatched)
@@ -569,6 +576,187 @@ func getNearestUpoint(l *luPoint, ups map[*ssa.BasicBlock][]*luPoint, dups map[*
 		return deferBeforeLock
 	}
 	return nil
+}
+
+type postDomInfo struct {
+	ipdom        map[*ssa.BasicBlock]*ssa.BasicBlock
+	postDominees map[*ssa.BasicBlock][]*ssa.BasicBlock
+	postDomSet   map[*ssa.BasicBlock]map[*ssa.BasicBlock]empty
+}
+
+var (
+	postDomCache   = map[*ssa.Function]*postDomInfo{}
+	postDomCacheMu sync.RWMutex
+)
+
+func getPostDomInfo(fn *ssa.Function) *postDomInfo {
+	if fn == nil {
+		return &postDomInfo{
+			ipdom:        map[*ssa.BasicBlock]*ssa.BasicBlock{},
+			postDominees: map[*ssa.BasicBlock][]*ssa.BasicBlock{},
+			postDomSet:   map[*ssa.BasicBlock]map[*ssa.BasicBlock]empty{},
+		}
+	}
+	postDomCacheMu.RLock()
+	if cached, ok := postDomCache[fn]; ok {
+		postDomCacheMu.RUnlock()
+		return cached
+	}
+	postDomCacheMu.RUnlock()
+
+	allSet := map[*ssa.BasicBlock]empty{}
+	for _, b := range fn.Blocks {
+		allSet[b] = emptyStruct
+	}
+
+	postDomSet := map[*ssa.BasicBlock]map[*ssa.BasicBlock]empty{}
+	for _, b := range fn.Blocks {
+		if len(b.Succs) == 0 {
+			postDomSet[b] = map[*ssa.BasicBlock]empty{b: emptyStruct}
+			continue
+		}
+		postDomSet[b] = copyBlockSet(allSet)
+	}
+
+	changed := true
+	for changed {
+		changed = false
+		for _, b := range fn.Blocks {
+			if len(b.Succs) == 0 {
+				continue
+			}
+			intersection := copyBlockSet(postDomSet[b.Succs[0]])
+			for _, succ := range b.Succs[1:] {
+				intersection = intersectBlockSets(intersection, postDomSet[succ])
+			}
+			intersection[b] = emptyStruct
+			if !equalBlockSets(postDomSet[b], intersection) {
+				postDomSet[b] = intersection
+				changed = true
+			}
+		}
+	}
+
+	ipdom := map[*ssa.BasicBlock]*ssa.BasicBlock{}
+	postDominees := map[*ssa.BasicBlock][]*ssa.BasicBlock{}
+	for _, b := range fn.Blocks {
+		strict := make([]*ssa.BasicBlock, 0, len(postDomSet[b]))
+		for _, cand := range fn.Blocks {
+			if cand == b {
+				continue
+			}
+			if _, ok := postDomSet[b][cand]; ok {
+				strict = append(strict, cand)
+			}
+		}
+		if len(strict) == 0 {
+			continue
+		}
+
+		var chosen *ssa.BasicBlock
+		for _, cand := range strict {
+			isImmediate := true
+			for _, other := range strict {
+				if other == cand {
+					continue
+				}
+				if _, ok := postDomSet[cand][other]; !ok {
+					isImmediate = false
+					break
+				}
+			}
+			if isImmediate {
+				chosen = cand
+				break
+			}
+		}
+		if chosen != nil {
+			ipdom[b] = chosen
+			postDominees[chosen] = append(postDominees[chosen], b)
+		}
+	}
+
+	info := &postDomInfo{
+		ipdom:        ipdom,
+		postDominees: postDominees,
+		postDomSet:   postDomSet,
+	}
+	postDomCacheMu.Lock()
+	if cached, ok := postDomCache[fn]; ok {
+		postDomCacheMu.Unlock()
+		return cached
+	}
+	postDomCache[fn] = info
+	postDomCacheMu.Unlock()
+	return info
+}
+
+func postDominates(info *postDomInfo, a, b *ssa.BasicBlock) bool {
+	if info == nil || a == nil || b == nil {
+		return false
+	}
+	set, ok := info.postDomSet[b]
+	if !ok {
+		return false
+	}
+	_, ok = set[a]
+	return ok
+}
+
+func domPostorder(f *ssa.Function) []*ssa.BasicBlock {
+	visited := map[*ssa.BasicBlock]empty{}
+	var order []*ssa.BasicBlock
+	var walk func(*ssa.BasicBlock)
+	walk = func(b *ssa.BasicBlock) {
+		if b == nil {
+			return
+		}
+		if _, ok := visited[b]; ok {
+			return
+		}
+		visited[b] = emptyStruct
+		for _, d := range b.Dominees() {
+			walk(d)
+		}
+		order = append(order, b)
+	}
+	if len(f.Blocks) > 0 {
+		walk(f.Blocks[0])
+	}
+	if f.Recover != nil {
+		walk(f.Recover)
+	}
+	return order
+}
+
+func copyBlockSet(in map[*ssa.BasicBlock]empty) map[*ssa.BasicBlock]empty {
+	out := make(map[*ssa.BasicBlock]empty, len(in))
+	for b := range in {
+		out[b] = emptyStruct
+	}
+	return out
+}
+
+func intersectBlockSets(a, b map[*ssa.BasicBlock]empty) map[*ssa.BasicBlock]empty {
+	out := map[*ssa.BasicBlock]empty{}
+	for k := range a {
+		if _, ok := b[k]; ok {
+			out[k] = emptyStruct
+		}
+	}
+	return out
+}
+
+func equalBlockSets(a, b map[*ssa.BasicBlock]empty) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k := range a {
+		if _, ok := b[k]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 type groupOps struct {

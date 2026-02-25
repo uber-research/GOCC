@@ -1,11 +1,11 @@
-//Copyright (c) 2020 Uber Technologies, Inc.
+// Copyright (c) 2020 Uber Technologies, Inc.
 //
-//Licensed under the Uber Non-Commercial License (the "License");
-//you may not use this file except in compliance with the License.
-//You may obtain a copy of the License at the root directory of this project.
+// Licensed under the Uber Non-Commercial License (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at the root directory of this project.
 //
-//See the License for the specific language governing permissions and
-//limitations under the License.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 package rtmlib
 
 import (
@@ -13,7 +13,6 @@ import (
 	"sync"
 	"unsafe"
 
-	"github.com/intel-go/cpuid"
 	rdtsc "github.com/uber-research/GOCC/tools/gocc/gordtsc"
 )
 
@@ -73,7 +72,7 @@ var weight [_MAX_WEIGHTS][perceptronEntry]cell
 var trailNum = []uint8{trialNumber, trialNumber, trialNumber}
 
 func init() {
-	hasRTM = cpuid.HasExtendedFeature(cpuid.RTM)
+	hasRTM = cpuHasRTM()
 	// if we know the program is executed in single thread, then don't use HTM at all
 	procsNum := runtime.GOMAXPROCS(0)
 	if procsNum == 1 {
@@ -171,6 +170,7 @@ func isUnpairedUnlock(status uint32) bool {
 
 // Lock tries to use RTM and mark the boolean variable
 // if failed, it will roll back to mutex
+//
 //go:nosplit
 func (ml *OptiLock) Lock(lock *sync.Mutex) {
 	// don't do anything without RTM support
@@ -258,6 +258,7 @@ _SLOWPATH:
 
 // Unlock will check if the lock is mutex or
 // then commit or unlock accordingly
+//
 //go:nosplit
 func (ml *OptiLock) Unlock(lock *sync.Mutex) {
 	// don't do anything without RTM support
@@ -301,6 +302,7 @@ func (ml *OptiLock) Unlock(lock *sync.Mutex) {
 
 // RLock tries to use RTM and mark the boolean variable
 // if failed, it will roll back to RWMutex
+//
 //go:nosplit
 func (ml *OptiLock) RLock(lock *sync.RWMutex) {
 	// don't do anything without RTM support
@@ -386,6 +388,7 @@ _SLOWPATH:
 
 // RUnlock will check if the lock is RWMutex or
 // then commit or unlock accordingly
+//
 //go:nosplit
 func (ml *OptiLock) RUnlock(lock *sync.RWMutex) {
 	// don't do anything without RTM support
@@ -425,6 +428,7 @@ func (ml *OptiLock) RUnlock(lock *sync.RWMutex) {
 
 // WLock tries to use RTM and mark the boolean variable
 // if failed, it will roll back to RWMutex
+//
 //go:nosplit
 func (ml *OptiLock) WLock(lock *sync.RWMutex) {
 	// don't do anything without RTM support
@@ -510,6 +514,7 @@ _SLOWPATH:
 
 // WUnlock will check if the lock is RWMutex or
 // then commit or unlock accordingly
+//
 //go:nosplit
 func (ml *OptiLock) WUnlock(lock *sync.RWMutex) {
 	// don't do anything without RTM support

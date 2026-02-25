@@ -1,11 +1,11 @@
-//Copyright (c) 2020 Uber Technologies, Inc.
+// Copyright (c) 2020 Uber Technologies, Inc.
 //
-//Licensed under the Uber Non-Commercial License (the "License");
-//you may not use this file except in compliance with the License.
-//You may obtain a copy of the License at the root directory of this project.
+// Licensed under the Uber Non-Commercial License (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at the root directory of this project.
 //
-//See the License for the specific language governing permissions and
-//limitations under the License.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 package main
 
 import (
@@ -13,7 +13,9 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
+	"runtime"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -23,6 +25,9 @@ import (
 )
 
 func TestPkgs(t *testing.T) {
+	if strings.HasPrefix(runtime.Version(), "go1.26") {
+		t.Skip("skipping on Go 1.26+: upstream golang.org/x/tools/go/pointer panics")
+	}
 
 	type testcases struct {
 		loc         string
